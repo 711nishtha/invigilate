@@ -42,3 +42,6 @@ Thumbs.db
 *.log
 .render/
 .vercel/
+
+# TypeScript incremental build cache
+*.tsbuildinfo

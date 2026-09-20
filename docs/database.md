@@ -204,6 +204,71 @@ Index: `(attempt_id, occurred_at)` — powers the attempt timeline view.
 4. `UNIQUE (family_id, content_hash)` on `question_variants` — no duplicate variants.
 5. `SELECT ... FOR UPDATE` on `attempts` during submission — exactly one finalization.
 
+## PostgreSQL-specific behaviour
+
+The unit test suite runs on in-memory SQLite for speed. PostgreSQL is the only
+supported production database, and the list below is everything the application
+relies on PostgreSQL to do. Each entry says what breaks if it is absent and
+where it is tested.
+
+| # | Reliance | Used by | If absent | Tested in |
+|---|---|---|---|---|
+| 1 | `SELECT ... FOR UPDATE` row locking | `attempt_access.resolve_attempt(for_update=True)` | Two concurrent submits could both grade and both email | `integration/test_postgres_concurrency.py::TestRowLocking` |
+| 2 | `READ COMMITTED` re-read after a lock is granted | Idempotent submission | The second submitter would act on a stale `IN_PROGRESS` row | `TestConcurrentSubmission` |
+| 3 | `UNIQUE (quiz_id, student_email)` under concurrent insert | One-attempt rule | Two simultaneous starts would both create a paper | `TestUniqueConstraintsUnderRace` |
+| 4 | `UNIQUE (attempt_question_id)` on `answers` | Answer upsert | Duplicate answer rows; grading would double-count | `TestUniqueConstraintsUnderRace` |
+| 5 | `UNIQUE (family_id, content_hash)` | Variant dedup | Duplicate variants could reach a paper | `test_models.py` (logic), integration (race) |
+| 6 | Native enum types | Every status column | An invalid status could be written by raw SQL or a bad migration | `TestNativeEnums` |
+| 7 | `jsonb` columns | `options_json`, `generation_config_json`, `metadata_json` | No indexed JSON querying for question statistics | exercised throughout |
+| 8 | `timestamptz` | All timestamps | Timezone-naive comparison; exam deadlines could shift by hours | `test_review_invariants.py::TestServerClockAuthority` |
+| 9 | `bigint` for `attempts.seed` | Seeded draw | A 63-bit seed would overflow a 32-bit integer | `test_core.py::TestSeeds` |
+| 10 | Transactional DDL | Alembic migrations | A failed migration could leave a half-applied schema | manual, on deploy |
+
+### Transaction boundaries
+
+One transaction per request, opened by the `get_db` dependency and rolled back
+on any exception. Within a submission the boundary is:
+
+```
+BEGIN
+  SELECT ... FROM attempts WHERE attempt_token_hash = :hash FOR UPDATE   -- lock
+  (check terminal state; if terminal, return the stored result and COMMIT)
+  UPDATE answers  SET is_correct = ...                                   -- grade
+  UPDATE attempts SET score, max_score, percentage, status, submitted_at
+COMMIT                                                                    -- lock released
+```
+
+`finalize_attempt` deliberately does **not** take the lock itself. The lock must
+be acquired by the same read that decided the attempt was still open, otherwise
+there is a window between the decision and the write in which another request
+can finalize.
+
+### Why SQLite is still used for unit tests
+
+SQLite serializes writes with a database-level lock, so the state-machine tests
+in `test_finalization.py` produce the right answers there — but they prove the
+*logic*, not the *concurrency*. Anything whose correctness depends on row
+locking, constraint enforcement under a race, or native enums is marked
+`requires_postgres` and skipped with a stated reason when `TEST_DATABASE_URL` is
+not a PostgreSQL URL. A green unit run is therefore never mistaken for a green
+concurrency run.
+
+```bash
+docker compose up -d db
+TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5433/secure_quiz     pytest tests/integration -v
+```
+
+### pgBouncer
+
+The application connects through Supabase's transaction pooler (port 6543) with
+`prepare_threshold=None`, because transaction-mode pooling cannot hold
+server-side prepared statements. Migrations use the direct connection (port
+5432): DDL must not run through the pooler.
+
+Session-level constructs (advisory locks, `LISTEN`/`NOTIFY`, temporary tables)
+are unavailable through the pooler and are therefore not used anywhere in the
+exam engine. Row locks are transaction-scoped and work normally.
+
 ## Migrations
 
 ```bash

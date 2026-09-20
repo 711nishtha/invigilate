@@ -28,18 +28,22 @@ Everything in the browser is attacker-controlled: the DOM, JavaScript,
 `localStorage`, the system clock, and every request body. The backend therefore
 owns all of the following, and none of them can be influenced by a request:
 
-| Authority | Where it is decided |
-|---|---|
-| Attempt identity | Attempt token hash compared server-side |
-| Quiz identity | Looked up by `public_code`, never accepted from the body |
-| Which variants a student gets | Seeded draw inside `attempt_service` |
-| Question order / option order | Seeded shuffle, persisted in `attempt_questions` |
-| Correct answers | `question_variants.correct_option`, never serialized to a student response |
-| Score | `grading.py`, at finalization only |
-| `started_at` / `expires_at` | Server clock (`now()`), written at creation |
-| Attempt state transitions | `attempt_service` under a row lock |
-| Integrity severity and totals | Server-side policy table |
-| Auto-submission | Server-side, inside the event request |
+| Authority | Where it is decided | Status |
+|---|---|---|
+| Attempt identity | `attempt_access.resolve_attempt` — lookup by token hash | built |
+| Quiz identity | Looked up by `public_code`, never accepted from the body | phase 4 |
+| Which variants a student gets | Seeded draw, one approved variant per family | phase 4 |
+| Question order / option order | Seeded shuffle, persisted in `attempt_questions` | phase 4 |
+| Correct answers | `question_variants.correct_option`, absent from every student schema | schema built |
+| Score | `grading.grade_attempt`, at finalization only | built |
+| `started_at` / `expires_at` | `core.clock.utcnow()`, written at creation | built |
+| Attempt state transitions | `attempt_finalization.finalize_attempt` under a row lock | built |
+| Integrity severity and totals | Server-side policy table | phase 5 |
+| Auto-submission | Server-side, inside the event request | phase 5 |
+
+"Status" is stated because a trust boundary that is documented but not yet
+implemented is a plan, not a control. Rows marked for a later phase are
+enforced by nothing today — there are no student endpoints yet.
 
 Explicitly untrusted and either ignored or stored as forensic metadata only:
 browser clocks, `client_reported_at`, `localStorage`, client-calculated scores,
@@ -58,12 +62,77 @@ Role comes from the `users` table keyed by `sub`. A body containing
 clause, not a post-fetch `if`, so a mis-scoped query returns nothing rather than
 leaking a row.
 
-Students are not required to hold a Supabase account. `POST /attempts/start`
-mints a high-entropy attempt token; only its SHA-256 hash is stored. The token
-authorizes one attempt. Sending attempt A's token to attempt B's endpoint returns
-404.
+Students are not required to hold a Supabase account; they are authorized by an
+attempt token instead, described in full in section 4.
 
-## 4. Answer-key confidentiality
+Identity for the one-attempt rule is resolved by `services/identity.py`. The MVP
+mechanism is `SELF_DECLARED_EMAIL`: the student types an address and the
+database enforces `UNIQUE (quiz_id, student_email)`. **This is a weak identity
+claim** — anyone can type anyone's address, and nothing stops a student using a
+second address on a second device. `StudentIdentity.is_verified` is `False` for
+this mechanism precisely so that no code treats it as proof. A signed-in student
+(`SUPABASE_ACCOUNT`) overrides whatever is typed in the form, and `dedupe_key`
+is the single value the rule keys on, so a stronger mechanism is a resolver plus
+a migration rather than a redesign of `Attempt`.
+
+## 4. The attempt-token model
+
+A student is authorized by a bearer token minted at `POST /attempts/start` and
+sent thereafter as `X-Attempt-Token`.
+
+**Generation.** `secrets.token_urlsafe(32)` — 32 bytes (256 bits) from the OS
+CSPRNG. Not a UUID, not derived from the attempt id, not guessable from
+anything the student can see.
+
+**Storage.** Only `sha256(token)` is stored, in `attempts.attempt_token_hash`.
+A leaked database backup does not hand out live attempts. A slow KDF (bcrypt,
+argon2) is deliberately *not* used: those defend low-entropy human passwords
+against offline guessing, and a 256-bit random token has nothing to guess. A
+single SHA-256 is the right primitive and keeps the per-request cost negligible.
+
+**Comparison.** `hmac.compare_digest` against the stored hash, so the comparison
+is constant-time. The preceding database lookup is an indexed equality match on
+a hash, which is not constant-time — but that leaks only timing about a hash of
+a 256-bit secret, which is not a usable oracle.
+
+**Scope.** The token authorizes exactly one attempt and nothing else. It grants
+no access to any other attempt, any quiz, or any teacher route.
+
+**Lookup order matters.** `resolve_attempt` queries by *token hash* and only
+then checks that the row's id equals the id the caller asked for:
+
+```python
+attempt = db.scalar(select(Attempt).where(Attempt.attempt_token_hash == hash(token)))
+if attempt is None or attempt.id != requested_id:
+    raise NotFound("No such attempt.")
+```
+
+The victim's row is never queried, so nothing about it can leak — not even
+whether it exists. The reverse order (fetch by id, then compare tokens) would
+make the endpoint an existence oracle for attempt ids.
+
+**Uniform failure.** A wrong token, a wrong id, a malformed id and a
+nonexistent attempt all raise the same `ATTEMPT_NOT_FOUND` with the same
+message. A test asserts the three cases are indistinguishable.
+
+**Lifecycle.** A token keeps working for *reads* after the attempt is terminal,
+because a student is entitled to see their own submitted result. It stops
+working for *writes* the moment the attempt becomes `SUBMITTED`,
+`AUTO_SUBMITTED` or `TIME_EXPIRED` — `require_active_attempt` raises
+`ATTEMPT_ALREADY_FINALIZED`. There is no code path that reopens a terminal
+attempt.
+
+**Logging.** `token` is in the redaction key list, so a token passed as a log
+field is replaced with `[REDACTED]`. Redaction works on fields, not on message
+text, so interpolating a token into a log message would defeat it; a test scans
+`app/` for exactly that pattern and fails if one appears.
+
+**Not yet covered.** Token rotation and explicit revocation are not implemented.
+A student who leaks their token to a classmate has shared their attempt, and the
+only remedy today is the teacher closing the quiz. `MULTIPLE_SESSION_DETECTED`
+(phase 5) is the intended signal for this, and it is a signal, not a block.
+
+## 5. Answer-key confidentiality
 
 The key never crosses the boundary:
 
@@ -75,10 +144,12 @@ The key never crosses the boundary:
 3. Option permutations live server-side; the student submits a *displayed* index
    which the server maps back through `options_order_json`.
 4. `GET /attempts/{id}/results` honours `show_score_after_submission`.
-5. A test asserts that no student-facing response body contains any of the
-   forbidden keys — the guarantee is enforced by CI, not by reviewer memory.
+5. Phase 4 adds a test asserting that no student-facing response body contains
+   any of the forbidden keys, so the guarantee is enforced by CI rather than by
+   reviewer memory. Points 2 and 3 are already enforced and tested; points 1 and
+   4 describe schemas that ship with the student endpoints.
 
-## 5. Integrity event severity policy
+## 6. Integrity event severity policy
 
 Severity is assigned by the server from this table. The teacher configures the
 budget (`max_integrity_violations`); the cumulative severity is compared against
@@ -113,7 +184,7 @@ browser is told what happened; it is never the thing that performs it. A student
 who kills JavaScript at the moment of the second violation does not escape — the
 event that crossed the threshold has already been processed server-side.
 
-## 6. Timing
+## 7. Timing
 
 `started_at` and `expires_at` are written from the server clock and are immutable.
 Every protected request compares `now()` against `expires_at`; past it, the
@@ -126,7 +197,7 @@ configurable by the client.
 Disconnecting the network does not pause the clock. Answers queued while offline
 are replayed on reconnect and are accepted only if the attempt is still live.
 
-## 7. Concurrency
+## 8. Concurrency
 
 - **Double submit**: `SELECT ... FOR UPDATE` on the attempt row. The loser of the
   race sees a terminal state and returns the stored result. One finalization, one
@@ -134,8 +205,17 @@ are replayed on reconnect and are accepted only if the attempt is still live.
 - **Double start**: `UNIQUE (quiz_id, student_email)`. The loser gets 409.
 - **Answer races**: unique constraint on `attempt_question_id` makes the write an
   upsert.
+- **Submit vs auto-submit vs expiry**: all three funnel through
+  `finalize_attempt`, which returns the stored result untouched if the attempt
+  is already terminal. A later manual submit cannot launder an
+  `AUTO_SUBMITTED` flag into a clean `SUBMITTED`.
 
-## 8. API hardening
+These are verified in `tests/integration/test_postgres_concurrency.py` against
+real PostgreSQL with two concurrent connections. They are **skipped** when
+`TEST_DATABASE_URL` is not a PostgreSQL URL; see docs/database.md,
+"PostgreSQL-specific behaviour".
+
+## 9. API hardening
 
 CORS allowlist from `CORS_ORIGINS` (no `*` when credentials are involved);
 per-route rate limits; request body cap (`MAX_REQUEST_BYTES`, default 256 KiB)
@@ -145,7 +225,7 @@ throughout (no string-built SQL); `metadata_json` size-capped before persistence
 security headers (`X-Content-Type-Options`, `Referrer-Policy`,
 `X-Frame-Options: DENY`); `/docs` and `/openapi.json` disabled in production.
 
-## 9. Secrets
+## 10. Secrets
 
 `GEMINI_API_KEY`, `RESEND_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
 `SUPABASE_JWT_SECRET` and `DATABASE_URL` exist only in the backend environment —
@@ -156,7 +236,73 @@ prefixed `VITE_` is public by definition and is treated that way.
 
 Structured logs redact tokens, JWTs and API keys, and never record answer keys.
 
-## 10. Known limitations
+## 11. What the server guarantees, and what the browser cannot
+
+The split below is the heart of the security model. Everything in the left
+column holds no matter what the student's browser does, including running
+modified JavaScript. Nothing in the right column can be guaranteed by any web
+application, and the product does not claim otherwise.
+
+### The server guarantees
+
+| Guarantee | Mechanism |
+|---|---|
+| An attempt belongs to exactly one student | Token-hash lookup; id mismatch is a 404 |
+| A student cannot read, answer or submit another student's attempt | `resolve_attempt` |
+| A submitted attempt can never be reopened | Terminal status checked on every write |
+| Two submits produce one score and one email | `FOR UPDATE` + idempotent `finalize_attempt` |
+| The clock cannot be extended from the browser | `expires_at` written server-side, re-checked per request |
+| The score cannot be set or influenced from the browser | Grading runs once, server-side, from the stored key |
+| The answer key is never sent to a student | Absent from student schemas; `is_correct` NULL during the exam |
+| A student cannot choose their own questions | Seeded draw server-side, frozen in `attempt_questions` |
+| One attempt per student per quiz | Database unique constraint, not an application check |
+| Only teacher-approved variants reach a paper | `validation_status = APPROVED` filter |
+| Integrity severity cannot be understated by the client | Severity assigned from the server-side policy table |
+
+### The browser cannot guarantee
+
+| Not guaranteed | Why |
+|---|---|
+| That no second device is in use | A web page cannot see a phone, tablet or second laptop |
+| That no other application is running | No web API enumerates OS processes |
+| That nobody else is in the room | No web API sees the room; camera capture is opt-in and can be denied |
+| That the person typing is the enrolled student | The MVP does no identity proofing |
+| That integrity events are reported at all | A student can disable the reporting script |
+| That fullscreen means a locked desktop | Fullscreen is a window state, not a kiosk mode |
+| That clipboard blocking prevents copying | Screenshots and a phone camera are outside the browser |
+| That DevTools is closed | Reliable detection does not exist; a fake detector is not implemented |
+
+The honest reading: a student who suppresses the reporting script produces a
+*silent* timeline, which the teacher can see as anomalous, but silence is not
+proof of misconduct. The defensible outcomes come from the left column —
+different papers, a server clock, server grading, and an auditable record —
+not from the monitoring.
+
+## 12. Database integrity guarantees
+
+Several security properties are enforced by PostgreSQL rather than by
+application code, because a constraint holds even when two requests race and
+even if a future code path forgets to check.
+
+| Constraint | Guarantees |
+|---|---|
+| `UNIQUE (quiz_id, student_email)` on `attempts` | One attempt per student per quiz, including under a concurrent double-start |
+| `UNIQUE (attempt_id, position)` on `attempt_questions` | A paper cannot gain two questions at one position |
+| `UNIQUE (attempt_id, variant_id)` on `attempt_questions` | The same variant cannot appear twice on one paper |
+| `UNIQUE (attempt_question_id)` on `answers` | An answer is an upsert; grading cannot double-count |
+| `UNIQUE (family_id, content_hash)` on `question_variants` | Exact-duplicate variants are refused even under a race |
+| `ON DELETE RESTRICT` on `attempt_questions.variant_id` | A variant that was served to a student cannot be deleted out from under the record of that exam |
+| `ON DELETE CASCADE` on attempt children | Deleting an attempt leaves no orphan answers or events |
+| Native enum types | An invalid status cannot be written, even by raw SQL |
+| `CHECK` on quiz duration, question count, violation budget | Nonsense exam settings are rejected at the storage layer |
+| `answers.is_correct` nullable | Correctness is genuinely absent during an exam, not merely unqueried |
+| `timestamptz` throughout | No timezone-naive comparison can shift a deadline |
+
+The full inventory of PostgreSQL-specific reliance, including transaction
+boundaries and what SQLite cannot reproduce, is in
+[database.md](./database.md#postgresql-specific-behaviour).
+
+## 13. Known limitations
 
 1. A second device (phone, laptop) is invisible to the browser.
 2. A virtual machine or screen-sharing tool outside the browser is invisible.
