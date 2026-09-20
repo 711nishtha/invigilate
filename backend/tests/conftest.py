@@ -108,3 +108,76 @@ def teacher_token() -> str:
 @pytest.fixture
 def auth_headers(teacher_token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {teacher_token}"}
+
+
+# --- Phase 2 fixtures ------------------------------------------------------
+
+TEACHER_A_SUB = "aaaaaaaa-0000-0000-0000-000000000001"
+TEACHER_B_SUB = "bbbbbbbb-0000-0000-0000-000000000002"
+
+
+def headers_for(subject: str, email: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {make_jwt(subject=subject, email=email)}"}
+
+
+def register_teacher(client: TestClient, subject: str, email: str, name: str) -> dict[str, str]:
+    """Create a teacher profile through the real endpoint and return its headers."""
+    headers = headers_for(subject, email)
+    response = client.post("/api/auth/profile", json={"name": name}, headers=headers)
+    assert response.status_code == 200, response.text
+    return headers
+
+
+@pytest.fixture
+def teacher_a(client: TestClient) -> dict[str, str]:
+    return register_teacher(client, TEACHER_A_SUB, "teacher.a@example.edu", "Teacher A")
+
+
+@pytest.fixture
+def teacher_b(client: TestClient) -> dict[str, str]:
+    """A second teacher, for cross-tenant authorization tests."""
+    return register_teacher(client, TEACHER_B_SUB, "teacher.b@example.edu", "Teacher B")
+
+
+@pytest.fixture(autouse=True)
+def stub_ai_provider():
+    """Every test runs against the stub provider unless it installs its own.
+
+    Guarantees no test can reach a paid API even if configuration drifts.
+    """
+    from app.ai.factory import set_ai_provider
+    from app.ai.stub import StubProvider
+
+    set_ai_provider(StubProvider())
+    yield
+    set_ai_provider(None)
+
+
+@pytest.fixture(autouse=True)
+def disable_rate_limiting():
+    """Turn the limiter off for ordinary tests.
+
+    slowapi's limiter is process-global and keys on the client IP, which is the
+    same 'testclient' for every test. Left on, the suite exhausts the budget
+    and unrelated tests start failing with 429s. Tests that exercise rate
+    limiting itself use the `rate_limited` fixture to switch it back on.
+    """
+    from app.core.rate_limit import limiter
+
+    limiter.enabled = False
+    yield
+    limiter.enabled = True
+
+
+@pytest.fixture
+def rate_limited():
+    """Enable rate limiting, with fresh storage, for one test."""
+    from app.core.rate_limit import limiter
+
+    limiter.enabled = True
+    try:
+        limiter._storage.reset()  # type: ignore[attr-defined]
+    except (AttributeError, NotImplementedError):
+        pass
+    yield limiter
+    limiter.enabled = False

@@ -106,29 +106,57 @@ flowchart TD
     H --> I["Non-sequential public_code, status = PUBLISHED, published_at set"]
 ```
 
-Publishing is refused unless the quiz has at least `question_count` families and
-every one of them has at least one `APPROVED` variant.
+Publishing is refused unless the quiz has at least `question_count` families
+with an assignable variant, and every assignable variant passes structural
+checks (distinct options, exactly one correct answer in range, a
+backend-computed numeric answer where applicable). `GET /readiness` returns the
+same blockers without attempting to publish, so the UI can explain them before
+the teacher presses the button.
 
 ## 5. Question generation
 
 ```mermaid
 flowchart TD
-    A["POST /api/questions/:id/generate-variants"] --> B["Quiz status becomes GENERATING"]
-    B --> C{"question_type"}
+    A["POST /api/questions/:id/generate-variants"] --> C{"question_type"}
     C -- NUMERICAL --> D["Deterministic parameter generation, backend computes the answer"]
     C -- "MCQ / TRUE_FALSE" --> E["AIProvider.generate_question_variants()"]
     D --> E2["AI may reword only, numeric answer stays backend-computed"]
     E --> F["Strict JSON parse, no silent repair"]
     E2 --> F
     F --> G{"Schema valid?"}
-    G -- no --> X["Rejected plus structured log VARIANT_GENERATION_FAILED"]
-    G -- yes --> H["Quality checks: four distinct options, index in range, topic, difficulty, explanation"]
-    H --> I["Duplicate detection against existing variants"]
-    I --> J["Persist variant with validation_status = PENDING"]
+    G -- no --> X["Rejected with a recorded reason, nothing stored"]
+    G -- yes --> H["Quality checks: distinct options, index in range, one correct answer, metadata"]
+    H --> I["Duplicate detection: exact hash plus near-duplicate similarity"]
+    I --> J["Persist with status = VALIDATED"]
     J --> K["Teacher reviews: APPROVE / REJECT / REGENERATE"]
-    K --> L["APPROVED variants enter the pool"]
-    L --> M["Only APPROVED variants can be served to students"]
+    K --> L["APPROVED, and PUBLISHED when the quiz goes live"]
+    L --> M["Only assignable variants can be served: APPROVED or PUBLISHED, not superseded"]
 ```
+
+
+### 5.1 Variant lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> GENERATED: provider returned a candidate
+    GENERATED --> VALIDATED: passed deterministic validation
+    GENERATED --> REJECTED: failed validation
+    VALIDATED --> APPROVED: a teacher approved it
+    VALIDATED --> REJECTED: a teacher refused it
+    APPROVED --> PUBLISHED: its quiz was published
+    APPROVED --> REJECTED: withdrawn before publication
+    PUBLISHED --> REJECTED: withdrawn from future papers
+    REJECTED --> VALIDATED: sent back for review
+```
+
+Only a human performs `VALIDATED -> APPROVED`. The transition table in
+`services/variant_lifecycle.py` has no path from `GENERATED` to `APPROVED`, and
+a test asserts it, so approval cannot become automatic by configuration.
+
+`APPROVED` and `PUBLISHED` variants are **content-immutable**: editing one
+creates a new version and marks the original superseded, so a question already
+served to a student never changes. See
+[database.md](./database.md#variant-immutability-and-versioning).
 
 10 originals x 5 variants = a **pool of 50**, not four fixed papers. See
 [ai-generation.md](./ai-generation.md).
@@ -227,6 +255,16 @@ costs a result.
 ```
 app/api/routes/    HTTP shape, authn/authz dependencies, Pydantic in/out
 app/services/      Business rules. The only place that mutates exam state.
+                     ownership.py            teacher tenant isolation
+                     quiz_service.py         quiz CRUD, publish/unpublish/close
+                     publish_rules.py        publish eligibility and blockers
+                     family_service.py       question family CRUD
+                     variant_service.py      generation, editing, supersession
+                     variant_lifecycle.py    the variant state machine
+                     selection.py            eligibility + seeded paper planning
+                     attempt_access.py       student attempt authorization
+                     attempt_finalization.py idempotent finalization
+                     grading.py              scoring, at finalization only
 app/db/models/     SQLAlchemy ORM, enums, constraints
 app/ai/            AIProvider abstraction, GeminiProvider, validation, dedupe
 app/email/         EmailProvider abstraction, ResendEmailProvider

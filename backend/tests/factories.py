@@ -24,7 +24,7 @@ from app.db.models import (
     QuizStatus,
     User,
     UserRole,
-    ValidationStatus,
+    VariantStatus,
 )
 
 OPTIONS = ["O(1)", "O(log n)", "O(n)", "O(n log n)"]
@@ -80,7 +80,7 @@ def make_variant(
     *,
     correct_option: int = 1,
     content_hash: str | None = None,
-    validation_status: ValidationStatus = ValidationStatus.APPROVED,
+    validation_status: VariantStatus = VariantStatus.APPROVED,
     numeric_answer: dict | None = None,
 ) -> QuestionVariant:
     variant = QuestionVariant(

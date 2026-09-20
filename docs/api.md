@@ -70,8 +70,19 @@ Returns the caller's profile from the database.
 | GET | `/api/quizzes` | List quizzes owned by the caller (paginated) |
 | GET | `/api/quizzes/{id}` | Quiz detail, including readiness counters |
 | PATCH | `/api/quizzes/{id}` | Update settings. Rejected once `PUBLISHED` for fields that would change a running exam |
-| POST | `/api/quizzes/{id}/publish` | Assign `public_code`, set status `PUBLISHED` |
+| GET | `/api/quizzes/{id}/readiness` | Why the quiz can or cannot be published |
+| POST | `/api/quizzes/{id}/publish` | Assign `public_code`, set `PUBLISHED`, promote approved variants |
+| POST | `/api/quizzes/{id}/unpublish` | Back to `DRAFT`; refused once any attempt exists |
 | POST | `/api/quizzes/{id}/close` | Status `CLOSED`; no new attempts, in-flight attempts finish |
+| DELETE | `/api/quizzes/{id}` | Delete; refused once any attempt exists |
+
+While a quiz is `PUBLISHED`, settings that change the shape of a live exam
+(`duration_seconds`, `question_count`, `security_level`,
+`max_integrity_violations`, `randomization_enabled`, `allow_backtracking`,
+`coverage_config_json`) are locked — `PATCH` returns 409
+`QUIZ_PUBLISHED_IMMUTABLE_FIELDS` naming them. Title and description stay
+editable. Question families cannot be added or removed at all while published
+(409 `QUIZ_PUBLISHED_IMMUTABLE`).
 
 `POST /api/quizzes` body:
 
@@ -89,37 +100,104 @@ Returns the caller's profile from the database.
 }
 ```
 
-`POST /publish` returns 409 with the specific shortfall when the quiz is not
-ready:
+`POST /publish` returns 409 listing every blocker when the quiz is not ready.
+`GET /readiness` returns the same information without attempting to publish, so
+the UI can explain the problem before the teacher presses the button:
 
 ```json
-{ "error": { "code": "QUIZ_NOT_READY", "message": "3 question families have no approved variant.",
-  "details": { "families_without_approved_variants": ["uuid", "uuid", "uuid"] } } }
+{
+  "publishable": false,
+  "blockers": [
+    { "code": "FAMILY_WITHOUT_APPROVED_VARIANT",
+      "message": "This question has no approved variant, so no student could be given it.",
+      "family_id": "uuid", "variant_id": null }
+  ],
+  "family_count": 4, "ready_family_count": 3,
+  "assignable_variant_count": 12, "question_count": 4,
+  "distinct_paper_estimate": 64
+}
 ```
 
+Blocker codes: `NO_QUESTION_FAMILIES`, `NOT_ENOUGH_FAMILIES`,
+`FAMILY_WITHOUT_APPROVED_VARIANT`, `VARIANT_MISSING_OPTIONS`,
+`VARIANT_MISSING_CORRECT_ANSWER`, `VARIANT_CORRECT_OPTION_OUT_OF_RANGE`,
+`VARIANT_DUPLICATE_OPTIONS`, `VARIANT_MISSING_NUMERIC_ANSWER`,
+`DUPLICATE_VARIANTS_IN_FAMILY`, `FAMILY_MISSING_METADATA`,
+`UNSUPPORTED_QUESTION_TYPE`, `TOPIC_COVERAGE_UNMET`,
+`DIFFICULTY_COVERAGE_UNMET`.
+
 ## Questions and variants (teacher)
+
+All implemented and tested. Ownership is resolved through `services.ownership`
+for every route: a family is reachable only through its quiz's owner, a variant
+only through its family's quiz's owner. A resource the caller does not own
+returns **404**, never 403.
 
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/quizzes/{id}/questions` | Create a question family |
-| GET | `/api/quizzes/{id}/questions` | List families with variant counts |
+| GET | `/api/quizzes/{id}/questions` | List families with lifecycle counts |
+| POST | `/api/quizzes/{id}/questions/reorder` | Set family positions |
+| GET | `/api/questions/{id}` | One family |
 | PATCH | `/api/questions/{id}` | Edit a family |
-| DELETE | `/api/questions/{id}` | Delete a family (blocked once the quiz is published) |
+| DELETE | `/api/questions/{id}` | Delete a family (refused if any variant was served) |
+| GET | `/api/questions/{id}/variants` | List variants, including superseded ones |
+| POST | `/api/questions/{id}/variants` | Add a variant by hand |
 | POST | `/api/questions/{id}/generate-variants` | Run the generation pipeline |
-| GET | `/api/questions/{id}/variants` | List variants with validation status |
-| POST | `/api/variants/{id}/approve` | `validation_status = APPROVED` |
-| POST | `/api/variants/{id}/reject` | `validation_status = REJECTED` + reason |
+| GET | `/api/variants/{id}` | One variant |
+| PATCH | `/api/variants/{id}` | Edit — **may return a new variant**, see below |
+| POST | `/api/variants/{id}/approve` | `VALIDATED` -> `APPROVED` |
+| POST | `/api/variants/{id}/reject` | -> `REJECTED`, with an optional reason |
+| POST | `/api/variants/{id}/reinstate` | `REJECTED` -> `VALIDATED` |
+| DELETE | `/api/variants/{id}` | Delete (refused if published or served) |
 
-`POST /generate-variants` body `{ "count": 5, "difficulty": "medium" }` → 202:
+### Variant lifecycle
+
+`GENERATED -> VALIDATED -> APPROVED -> PUBLISHED`, with `REJECTED` reachable
+from any state and returning to `VALIDATED`. Illegal transitions return 409
+`ILLEGAL_VARIANT_TRANSITION` with the allowed targets in `details`. Only a
+human performs `VALIDATED -> APPROVED`; there is no configuration that
+auto-approves generated content.
+
+### `POST /api/questions/{id}/generate-variants`
+
+Body `{ "count": 5, "difficulty": "medium" }`. Returns **200 even when the
+provider fails**, because a Gemini outage is a reportable event rather than a
+server error, and the family is left untouched:
 
 ```json
-{ "family_id": "uuid", "requested": 5, "accepted": 4, "rejected": 1,
-  "rejections": [{ "reason": "DUPLICATE_OF_EXISTING", "detail": "similarity 0.97" }] }
+{
+  "family_id": "uuid", "requested": 5, "accepted": 4,
+  "rejected": [{ "index": 3, "reasons": [{ "reason": "DUPLICATE_OF_EXISTING", "detail": "similarity 0.97" }] }],
+  "provider": "gemini", "model": "gemini-2.5-flash", "prompt_version": "mcq-v1",
+  "variants": [ /* VariantOut, status VALIDATED */ ],
+  "error_code": null, "error_message": null
+}
 ```
 
-Accepted variants land as `PENDING`. **Nothing is auto-approved.**
+On provider failure: `error_code` is one of `AITimeout`, `AIRateLimited`,
+`AITransportError`, `AIRequestRejected`, `AIMalformedResponse`; `accepted` is 0
+and `variants` is empty. Rate limited at 20/minute per caller.
+
+Accepted variants land as `VALIDATED`. **Nothing is auto-approved.**
+
+### `PATCH /api/variants/{id}`
+
+Editing a `GENERATED` or `VALIDATED` variant updates it in place and returns the
+same id. Editing an `APPROVED`, `PUBLISHED` or already-served variant **creates
+a new version**: the response is a different variant with `version` incremented,
+and the original keeps its text with `superseded_by_id` set. See
+[database.md](./database.md#variant-immutability-and-versioning).
+
+Errors: 409 `NO_CHANGE` if the edit changes no content, 409 `DUPLICATE_VARIANT`
+if it would duplicate a sibling.
 
 ## Public / student
+
+> **Status: not implemented.** Everything in this section ships in phase 4. The
+> student-facing response schema (`StudentQuestionOut`) exists and is tested for
+> answer-key non-disclosure, but no student endpoint is registered yet.
+
 
 ### `GET /api/public/quizzes/{public_code}`
 No auth. Returns only what the pre-exam screen needs:

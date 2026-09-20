@@ -34,7 +34,7 @@ states outright.
 | `security_level` | `STANDARD`, `SECURE`, `STRICT` |
 | `question_type` | `MCQ`, `NUMERICAL`, `TRUE_FALSE`, `SHORT_ANSWER` |
 | `generation_status` | `AI_GENERATED`, `DETERMINISTIC`, `MANUAL`, `FAILED` |
-| `validation_status` | `PENDING`, `APPROVED`, `REJECTED` |
+| `variant_status` | `GENERATED`, `VALIDATED`, `APPROVED`, `PUBLISHED`, `REJECTED` |
 | `attempt_status` | `IN_PROGRESS`, `SUBMITTED`, `AUTO_SUBMITTED`, `TIME_EXPIRED`, `ABANDONED` |
 | `integrity_status` | `CLEAN`, `WARNING`, `FLAGGED` |
 | `integrity_event_type` | 20 values, listed in [security.md](./security.md) |
@@ -70,6 +70,7 @@ states outright.
 | `allow_backtracking` | bool NOT NULL DEFAULT true | |
 | `show_score_after_submission` | bool NOT NULL DEFAULT false | |
 | `status` | `quiz_status` NOT NULL DEFAULT `DRAFT` | |
+| `coverage_config_json` | jsonb NOT NULL DEFAULT '{}' | optional publish requirements: `required_topics`, `required_difficulties`, `required_objectives` |
 | `created_at` / `published_at` | timestamptz | |
 
 Indexes: `(owner_id, created_at DESC)`, unique `(public_code)`.
@@ -108,9 +109,14 @@ Index: `(quiz_id, position)`.
 | `generation_model` | text NULL | e.g. `gemini-2.5-flash` |
 | `generation_prompt_version` | text NULL | prompt versioning for auditability |
 | `generation_status` | `generation_status` NOT NULL | |
-| `validation_status` | `validation_status` NOT NULL DEFAULT `PENDING` | |
+| `validation_status` | `variant_status` NOT NULL DEFAULT `GENERATED` | lifecycle state; only `APPROVED`/`PUBLISHED` are assignable |
 | `content_hash` | varchar(64) NOT NULL | normalized SHA-256, backs duplicate detection |
-| `rejection_reason` | text NULL | |
+| `rejection_reason` | text NULL | why a teacher refused it |
+| `validation_errors_json` | jsonb NULL | why deterministic validation refused it; teacher-only |
+| `version` | int NOT NULL DEFAULT 1 | incremented by each supersession |
+| `superseded_by_id` | uuid FK -> question_variants.id NULL | set when an edit created a newer version |
+| `approved_at` | timestamptz NULL | audit trail |
+| `approved_by_id` | uuid FK -> users.id NULL | who let this question through |
 | `created_at` | timestamptz | |
 
 Constraints:
@@ -204,6 +210,41 @@ Index: `(attempt_id, occurred_at)` — powers the attempt timeline view.
 4. `UNIQUE (family_id, content_hash)` on `question_variants` — no duplicate variants.
 5. `SELECT ... FOR UPDATE` on `attempts` during submission — exactly one finalization.
 
+
+### Variant immutability and versioning
+
+**Decision: an approved variant is never rewritten. Editing supersedes it.**
+
+The rule that forces this: *a question already used by an attempt must never
+silently change underneath that attempt.* A student who sat question V3 must be
+able to have their paper re-read, disputed and re-marked against exactly the
+text they saw.
+
+| Variant state | Editing behaviour |
+|---|---|
+| `GENERATED`, `VALIDATED` | Edited **in place**. Nothing has been shown to anyone, so there is nothing to protect. |
+| `APPROVED`, `PUBLISHED`, or referenced by any `attempt_questions` row | **Superseded**: a new row is inserted with `version = old.version + 1`, and the old row's `superseded_by_id` points at it. |
+
+Consequences, all enforced in `services/variant_service.py` and tested in
+`tests/test_variant_lifecycle.py`:
+
+- The original row keeps its text, options and key forever. `attempt_questions`
+  references it by id, so historical papers are unaffected.
+- A superseded variant is no longer **assignable** even while `APPROVED`, so new
+  papers draw the newer version. `QuestionVariant.is_assignable` is the single
+  definition of eligibility.
+- A replacement enters at `VALIDATED`, not `APPROVED`: a new version is a new
+  question and is approved on its own merits.
+- A variant referenced by an attempt can never be deleted. `ON DELETE RESTRICT`
+  on `attempt_questions.variant_id` enforces this in the database; the service
+  checks first so the teacher gets an explanation rather than a constraint error.
+- A published variant can still be **rejected**, which withdraws it from future
+  papers while changing nothing about papers already built.
+
+The alternative — forbidding edits outright — was rejected because teachers do
+need to fix a typo, and forcing "reject and rewrite from scratch" loses the
+provenance chain that `version` and `superseded_by_id` preserve.
+
 ## PostgreSQL-specific behaviour
 
 The unit test suite runs on in-memory SQLite for speed. PostgreSQL is the only
@@ -223,6 +264,7 @@ where it is tested.
 | 8 | `timestamptz` | All timestamps | Timezone-naive comparison; exam deadlines could shift by hours | `test_review_invariants.py::TestServerClockAuthority` |
 | 9 | `bigint` for `attempts.seed` | Seeded draw | A 63-bit seed would overflow a 32-bit integer | `test_core.py::TestSeeds` |
 | 10 | Transactional DDL | Alembic migrations | A failed migration could leave a half-applied schema | manual, on deploy |
+| 11 | Enum type replacement (`ALTER TYPE ... USING`) | migration `0002_variant_lifecycle` | The variant lifecycle could not be migrated without data loss | manual, on deploy |
 
 ### Transaction boundaries
 

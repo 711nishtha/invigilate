@@ -20,9 +20,38 @@ class AIProvider(ABC):
     ) -> RawVariantBatch: ...
 ```
 
-`GeminiProvider` is the first implementation. `StubProvider` returns fixtures and
-is what the test suite and offline development use — no test ever calls a paid
-API. Selection is by `AI_PROVIDER`; nothing outside `app/ai/` imports Gemini.
+`GeminiProvider` (`app/ai/gemini.py`) is the only module in the codebase that
+knows Gemini exists. It speaks the REST API over httpx rather than an SDK, which
+keeps the dependency surface small and the failure modes explicit.
+
+`StubProvider` returns deterministic fixtures and can be told to fail in each of
+the ways a real provider fails. An autouse fixture installs it for the whole
+test suite, so no test run can reach a paid API even if configuration drifts.
+
+Selection is `get_ai_provider()` in `app/ai/factory.py`, driven by
+`AI_PROVIDER`. Services depend on the abstraction; **nothing outside `app/ai/`
+imports Gemini or names a model**.
+
+### Failure taxonomy
+
+Every failure is a typed subclass of `AIProviderError`, so callers can tell
+"try again" from "this will never work":
+
+| Error | Cause | Retryable |
+|---|---|---|
+| `AITimeout` | No response within `AI_REQUEST_TIMEOUT_SECONDS` | yes |
+| `AIRateLimited` | HTTP 429, carries `retry_after` | yes |
+| `AITransportError` | Network failure or 5xx | yes |
+| `AIRequestRejected` | 4xx other than 429: bad key, bad request, content filter | no |
+| `AIMalformedResponse` | Answered, but not with the JSON contract | no |
+
+Retries are bounded (3 attempts, 0.5s then 2s backoff, capped at the provider's
+own `Retry-After`) and cover transport only. **A schema failure is never retried
+into acceptance** — the teacher is shown the rejection and can regenerate.
+
+The service catches all of these and returns a 200 with `error_code` set. The
+question family is left untouched, and an already-published quiz is unaffected:
+generation is a preparation-time activity that is never on a student's path.
 
 ## 3. Pipeline
 
@@ -30,14 +59,19 @@ API. Selection is by `AI_PROVIDER`; nothing outside `app/ai/` imports Gemini.
 teacher request
   -> build prompt (versioned)
   -> provider call (timeout, bounded retries)
-  -> strict JSON parse
-  -> schema validation
-  -> quality checks
-  -> duplicate detection
-  -> persist as PENDING
+  -> strict JSON parse          app/ai/gemini.py
+  -> schema validation          app/ai/validation.py
+  -> quality checks             app/ai/validation.py
+  -> duplicate detection        app/ai/dedupe.py
+  -> persist as VALIDATED       app/services/variant_service.py
   -> teacher review
   -> APPROVED
+  -> PUBLISHED (when the quiz publishes; immutable from here)
 ```
+
+Note the state a survivor lands in: **VALIDATED, not APPROVED**. Passing every
+deterministic check means the variant is well-formed, not that a teacher has
+agreed to put it in front of students.
 
 A failure at any stage rejects that variant with a recorded reason. Malformed
 output is never repaired into something plausible-looking and never silently
@@ -73,8 +107,15 @@ Validation, in order:
 | `topic` present | `MISSING_TOPIC` |
 | `difficulty` in {easy, medium, hard} | `MISSING_DIFFICULTY` |
 | `explanation` present, >= 10 chars | `MISSING_EXPLANATION` |
+| No option is "all/none of the above" | `CATCH_ALL_OPTION` |
+| `correct_option` is not a list, and no `correct_options` key | `MULTIPLE_CORRECT_ANSWERS` |
+| `correct_option` is an int, not a bool (`True == 1` in Python) | `CORRECT_OPTION_NOT_AN_INDEX` |
+| True/false options are exactly `["True", "False"]` | `TRUE_FALSE_OPTIONS_INVALID` |
 | Not a near-duplicate of an existing variant | `DUPLICATE_OF_EXISTING` |
 | Not a near-duplicate within the same batch | `DUPLICATE_IN_BATCH` |
+
+`CATCH_ALL_OPTION` exists because "all of the above" becomes meaningless once
+option order is shuffled per student, which this platform always does.
 
 The model returning 5 variants of which 4 survive is a normal, logged outcome —
 `accepted: 4, rejected: 1` — not an error.
@@ -147,10 +188,16 @@ which increases the spread further.
 
 ## 9. Review is mandatory
 
-A variant is served to a student only when `validation_status = APPROVED`, and
-approval is a human action through `POST /api/variants/{id}/approve`. There is no
-configuration flag that auto-approves AI output. `POST /publish` fails if any
-family that could be drawn has no approved variant.
+A variant is served to a student only when it is **assignable**:
+`validation_status` in (`APPROVED`, `PUBLISHED`) **and** `superseded_by_id IS
+NULL`. `QuestionVariant.is_assignable` is the single definition, used by both
+the publish rules and the selection pool so the two cannot disagree.
+
+Approval is a human action through `POST /api/variants/{id}/approve`. The
+transition table in `services/variant_lifecycle.py` has no path from
+`GENERATED` to `APPROVED`, and a test asserts that, so no configuration change
+or future code path can make approval automatic. `POST /publish` fails if any
+family that could be drawn has no assignable variant.
 
 ## 10. Cost and failure behaviour
 

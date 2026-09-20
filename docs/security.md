@@ -32,9 +32,12 @@ owns all of the following, and none of them can be influenced by a request:
 |---|---|---|
 | Attempt identity | `attempt_access.resolve_attempt` — lookup by token hash | built |
 | Quiz identity | Looked up by `public_code`, never accepted from the body | phase 4 |
-| Which variants a student gets | Seeded draw, one approved variant per family | phase 4 |
+| Quiz ownership | `services.ownership` — a WHERE clause, not a post-fetch check | built, tested |
+| Publish eligibility | `services.publish_rules` — server decides, client only renders | built, tested |
+| Variant approval | `services.variant_lifecycle` — only a human reaches APPROVED | built, tested |
+| Which variants a student gets | Seeded draw, one approved variant per family | selection primitives built; assignment phase 4 |
 | Question order / option order | Seeded shuffle, persisted in `attempt_questions` | phase 4 |
-| Correct answers | `question_variants.correct_option`, absent from every student schema | schema built |
+| Correct answers | `question_variants.correct_option`, absent from `StudentQuestionOut` | built, tested |
 | Score | `grading.grade_attempt`, at finalization only | built |
 | `started_at` / `expires_at` | `core.clock.utcnow()`, written at creation | built |
 | Attempt state transitions | `attempt_finalization.finalize_attempt` under a row lock | built |
@@ -236,7 +239,51 @@ prefixed `VITE_` is public by definition and is treated that way.
 
 Structured logs redact tokens, JWTs and API keys, and never record answer keys.
 
-## 11. What the server guarantees, and what the browser cannot
+## 11. Teacher-tenant isolation
+
+Teachers are tenants of one another. Every teacher-facing route resolves its
+resource through `services/ownership.py`, which applies the ownership predicate
+**inside the query**:
+
+```python
+select(QuestionVariant)
+    .join(QuestionFamily, ...).join(Quiz, ...)
+    .where(QuestionVariant.id == requested_id, Quiz.owner_id == caller.id)
+```
+
+A variant belonging to another teacher does not match, so there is no row to
+forget to check. Three consequences, each tested in `tests/test_ownership.py`:
+
+- **404, never 403.** Another teacher's quiz and a nonexistent quiz return byte-
+  identical responses, so ids cannot be probed for existence.
+- **Malformed ids are authorization failures.** `parse_uuid` raises the same 404
+  rather than a 422, which would otherwise reveal that an id was well-formed but
+  unknown.
+- **Nothing is mutated on a failed attempt.** A test asserts teacher B's variant
+  is byte-identical after teacher A attempts approve, edit and delete on it.
+
+`ADMIN` bypasses the owner predicate by design. That is the only role that does,
+and the role comes from the database row, never from a request.
+
+## 12. Answer-key confidentiality in the teacher API
+
+The teacher-facing `VariantOut` schema **does** carry `correct_option`,
+`numeric_answer_json` and `explanation`. That is deliberate: a review screen is
+useless without the answer. What confines it is ownership (section 11).
+
+The student-facing `StudentQuestionOut` schema has no field capable of holding a
+key. `tests/test_answer_key_disclosure.py` asserts:
+
+- the schema's field set is exactly what a student needs, and its intersection
+  with the forbidden-field list is empty;
+- handing it a full ORM-shaped dict still emits none of the forbidden fields —
+  the serializer has nowhere to put them;
+- no unauthenticated response, and no error response, contains a forbidden key
+  at any depth;
+- prompt text never appears in any response (the prompt *version* does, as
+  provenance).
+
+## 13. What the server guarantees, and what the browser cannot
 
 The split below is the heart of the security model. Everything in the left
 column holds no matter what the student's browser does, including running
@@ -256,7 +303,10 @@ application, and the product does not claim otherwise.
 | The answer key is never sent to a student | Absent from student schemas; `is_correct` NULL during the exam |
 | A student cannot choose their own questions | Seeded draw server-side, frozen in `attempt_questions` |
 | One attempt per student per quiz | Database unique constraint, not an application check |
-| Only teacher-approved variants reach a paper | `validation_status = APPROVED` filter |
+| Only teacher-approved variants reach a paper | `is_assignable`: APPROVED/PUBLISHED and not superseded |
+| A teacher cannot touch another teacher's content | Ownership predicate inside every query |
+| A served question never changes | Supersession, plus `ON DELETE RESTRICT` |
+| An unready quiz cannot be published | `publish_rules` blockers, checked server-side |
 | Integrity severity cannot be understated by the client | Severity assigned from the server-side policy table |
 
 ### The browser cannot guarantee
@@ -278,7 +328,7 @@ proof of misconduct. The defensible outcomes come from the left column —
 different papers, a server clock, server grading, and an auditable record —
 not from the monitoring.
 
-## 12. Database integrity guarantees
+## 14. Database integrity guarantees
 
 Several security properties are enforced by PostgreSQL rather than by
 application code, because a constraint holds even when two requests race and
@@ -291,6 +341,7 @@ even if a future code path forgets to check.
 | `UNIQUE (attempt_id, variant_id)` on `attempt_questions` | The same variant cannot appear twice on one paper |
 | `UNIQUE (attempt_question_id)` on `answers` | An answer is an upsert; grading cannot double-count |
 | `UNIQUE (family_id, content_hash)` on `question_variants` | Exact-duplicate variants are refused even under a race |
+| `ON DELETE RESTRICT` on `attempt_questions.variant_id` | A served variant cannot be deleted; history cannot be rewritten |
 | `ON DELETE RESTRICT` on `attempt_questions.variant_id` | A variant that was served to a student cannot be deleted out from under the record of that exam |
 | `ON DELETE CASCADE` on attempt children | Deleting an attempt leaves no orphan answers or events |
 | Native enum types | An invalid status cannot be written, even by raw SQL |
@@ -302,7 +353,7 @@ The full inventory of PostgreSQL-specific reliance, including transaction
 boundaries and what SQLite cannot reproduce, is in
 [database.md](./database.md#postgresql-specific-behaviour).
 
-## 13. Known limitations
+## 15. Known limitations
 
 1. A second device (phone, laptop) is invisible to the browser.
 2. A virtual machine or screen-sharing tool outside the browser is invisible.

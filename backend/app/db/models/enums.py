@@ -44,10 +44,42 @@ class GenerationStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
-class ValidationStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
+class VariantStatus(str, enum.Enum):
+    """Explicit lifecycle for a generated question variant.
+
+    Generated content is never automatically publishable. A variant walks
+    GENERATED -> VALIDATED -> APPROVED -> PUBLISHED, and only a human moves it
+    from VALIDATED to APPROVED. Legal transitions are enforced in
+    ``services/variant_lifecycle.py``; this enum only names the states.
+    """
+
+    GENERATED = "GENERATED"  # raw provider output, nothing checked yet
+    VALIDATED = "VALIDATED"  # passed deterministic backend validation
+    APPROVED = "APPROVED"  # a teacher accepted it
+    PUBLISHED = "PUBLISHED"  # its quiz went live; now immutable
+    REJECTED = "REJECTED"  # failed validation or refused by a teacher
+
+    @property
+    def is_assignable(self) -> bool:
+        """Whether a student's paper may draw this variant.
+
+        The single source of truth for eligibility. GENERATED and VALIDATED are
+        deliberately excluded: passing validation is not consent.
+        """
+        return self in _ASSIGNABLE_VARIANT_STATUSES
+
+    @property
+    def is_immutable(self) -> bool:
+        """Whether editing must supersede rather than mutate.
+
+        Once a teacher has approved a variant it may already be on a paper, so
+        its text can never change underneath a historical attempt.
+        """
+        return self in _IMMUTABLE_VARIANT_STATUSES
+
+
+_ASSIGNABLE_VARIANT_STATUSES = frozenset({VariantStatus.APPROVED, VariantStatus.PUBLISHED})
+_IMMUTABLE_VARIANT_STATUSES = frozenset({VariantStatus.APPROVED, VariantStatus.PUBLISHED})
 
 
 class AttemptStatus(str, enum.Enum):

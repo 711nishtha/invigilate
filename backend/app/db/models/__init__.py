@@ -16,7 +16,7 @@ from app.db.models.enums import (
     QuizStatus,
     SecurityLevel,
     UserRole,
-    ValidationStatus,
+    VariantStatus,
 )
 from app.db.models.integrity import IntegrityEvent
 from app.db.models.question import QuestionFamily, QuestionVariant
@@ -42,5 +42,5 @@ __all__ = [
     "SecurityLevel",
     "User",
     "UserRole",
-    "ValidationStatus",
+    "VariantStatus",
 ]

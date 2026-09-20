@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -23,7 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, created_at_column, uuid_pk
-from app.db.models.enums import GenerationStatus, QuestionType, ValidationStatus
+from app.db.models.enums import GenerationStatus, QuestionType, VariantStatus
 from app.db.types import GUID, JSONColumn, pg_enum
 
 if TYPE_CHECKING:
@@ -86,19 +87,42 @@ class QuestionVariant(Base):
         nullable=False,
         default=GenerationStatus.AI_GENERATED,
     )
-    validation_status: Mapped[ValidationStatus] = mapped_column(
-        pg_enum(ValidationStatus, "validation_status"),
+    validation_status: Mapped[VariantStatus] = mapped_column(
+        pg_enum(VariantStatus, "variant_status"),
         nullable=False,
-        default=ValidationStatus.PENDING,
+        default=VariantStatus.GENERATED,
     )
     # SHA-256 of normalized text + sorted options. Backs exact-duplicate
     # rejection at the database level.
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Why deterministic validation refused this variant. Teacher-facing only:
+    # it quotes provider output and must never reach a student.
+    validation_errors_json: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSONColumn, nullable=True
+    )
+
+    # --- Versioning -------------------------------------------------------
+    # An approved variant may already sit on somebody's paper, so editing it
+    # creates a new row and points the old one here. attempt_questions keeps
+    # referencing the exact row it was served, which is what stops history
+    # changing underneath a finished exam.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID, ForeignKey("question_variants.id", ondelete="SET NULL"), nullable=True
+    )
+
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = created_at_column()
 
     family: Mapped["QuestionFamily"] = relationship(back_populates="variants")
     attempt_questions: Mapped[list["AttemptQuestion"]] = relationship(back_populates="variant")
+    superseded_by: Mapped["QuestionVariant | None"] = relationship(
+        remote_side="QuestionVariant.id", foreign_keys=[superseded_by_id]
+    )
 
     __table_args__ = (
         UniqueConstraint("family_id", "content_hash", name="uq_question_variants_family_id_content_hash"),
@@ -111,7 +135,17 @@ class QuestionVariant(Base):
 
     @property
     def is_approved(self) -> bool:
-        return self.validation_status == ValidationStatus.APPROVED
+        return self.validation_status == VariantStatus.APPROVED
+
+    @property
+    def is_assignable(self) -> bool:
+        """Eligible to appear on a student's paper.
+
+        Superseded variants are excluded even while APPROVED: a newer version
+        exists, so new papers must draw that instead. Papers already built keep
+        the row they were served.
+        """
+        return self.validation_status.is_assignable and self.superseded_by_id is None
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<QuestionVariant {self.id} {self.validation_status.value}>"

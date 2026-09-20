@@ -72,6 +72,27 @@ class AttemptExpired(AppError):
     code = "ATTEMPT_EXPIRED"
 
 
+def _serializable_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """Make Pydantic's error list safe to serialize.
+
+    A custom field validator that raises ValueError puts the exception object
+    itself into ``ctx``, which json.dumps cannot encode — turning a 422 into a
+    500. Stringifying ctx keeps the useful detail without the object.
+    """
+    cleaned: list[dict[str, Any]] = []
+    for error in exc.errors():
+        entry = {
+            "type": error.get("type"),
+            "loc": [str(part) for part in error.get("loc", ())],
+            "msg": str(error.get("msg", "")),
+        }
+        context = error.get("ctx")
+        if context:
+            entry["ctx"] = {key: str(value) for key, value in context.items()}
+        cleaned.append(entry)
+    return cleaned
+
+
 def _error_response(
     status_code: int, code: str, message: str, details: dict[str, Any] | None = None
 ) -> JSONResponse:
@@ -92,7 +113,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "VALIDATION_ERROR",
             "Request validation failed.",
-            {"errors": exc.errors()},
+            {"errors": _serializable_errors(exc)},
         )
 
     @app.exception_handler(StarletteHTTPException)

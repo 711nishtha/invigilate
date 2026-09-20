@@ -28,7 +28,7 @@ from app.db.models import (
     QuizStatus,
     User,
     UserRole,
-    ValidationStatus,
+    VariantStatus,
 )
 
 
@@ -69,7 +69,7 @@ def make_variant(db: Session, quiz: Quiz, content_hash: str = "hash-1") -> Quest
         options_json=["O(1)", "O(log n)", "O(n)", "O(n log n)"],
         correct_option=1,
         content_hash=content_hash,
-        validation_status=ValidationStatus.APPROVED,
+        validation_status=VariantStatus.APPROVED,
     )
     db.add(variant)
     db.commit()
@@ -111,7 +111,7 @@ class TestDefaults:
         )
         db.add(variant)
         db.commit()
-        assert variant.validation_status == ValidationStatus.PENDING
+        assert variant.validation_status == VariantStatus.GENERATED
         assert variant.is_approved is False
 
     def test_attempt_starts_in_progress_and_clean(self, db: Session) -> None:

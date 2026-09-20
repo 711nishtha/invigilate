@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, created_at_column, uuid_pk
 from app.db.models.enums import QuizStatus, SecurityLevel
-from app.db.types import GUID, pg_enum
+from app.db.types import GUID, JSONColumn, pg_enum
 
 if TYPE_CHECKING:
     from app.db.models.attempt import Attempt
@@ -46,6 +46,13 @@ class Quiz(Base):
     )
     status: Mapped[QuizStatus] = mapped_column(
         pg_enum(QuizStatus, "quiz_status"), nullable=False, default=QuizStatus.DRAFT
+    )
+    # Optional publish requirements, e.g.
+    # {"required_topics": ["Trees"], "required_difficulties": ["hard"]}.
+    # Empty by default so a quiz is not boxed in by assumptions made here; the
+    # assignment engine reads the same keys when selecting variants.
+    coverage_config_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONColumn, nullable=False, default=dict
     )
     created_at: Mapped[datetime] = created_at_column()
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
