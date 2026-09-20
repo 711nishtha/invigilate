@@ -1,0 +1,66 @@
+# Local development stack: the API plus a throwaway PostgreSQL.
+#
+# This exists so the exam engine can be developed and tested without touching
+# the real Supabase project. Production uses Supabase for PostgreSQL, Auth and
+# Storage; only the database is replaced here.
+#
+#   docker compose up --build
+#   docker compose exec api alembic upgrade head
+#
+# The frontend is NOT containerised — `npm run dev` is faster and gives HMR.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: secure_quiz
+    ports:
+      - "5433:5432" # 5433 on the host so a local PostgreSQL install still works
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d secure_quiz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
+      PORT: 8000
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/secure_quiz
+      ALEMBIC_DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/secure_quiz
+      FRONTEND_URL: http://localhost:5173
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      # Providers default to stubs locally so development never spends money on
+      # a paid API by accident. Override with real keys when testing them.
+      AI_PROVIDER: ${AI_PROVIDER:-stub}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-stub}
+      # Supabase Auth is still required for teacher login; supply these from a
+      # local .env or the shell when working on authenticated routes.
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Live reload during development; the image still builds standalone.
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+    command: >
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+volumes:
+  pgdata:
