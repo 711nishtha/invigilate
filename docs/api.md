@@ -194,9 +194,24 @@ if it would duplicate a sibling.
 
 ## Public / student
 
-> **Status: not implemented.** Everything in this section ships in phase 4. The
-> student-facing response schema (`StudentQuestionOut`) exists and is tested for
-> answer-key non-disclosure, but no student endpoint is registered yet.
+**Implemented and tested.** Public routes need no credential; every
+`/api/student/*` route needs the attempt token in `X-Attempt-Token`. Every
+authorization failure — wrong token, wrong id, malformed id, unknown attempt —
+returns an identical 404.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/public/quizzes/{public_code}` | none | Pre-exam summary |
+| POST | `/api/public/quizzes/{public_code}/attempts` | none | Start an attempt (rate limited) |
+| GET | `/api/student/attempts/{id}` | token | State + authoritative clock |
+| GET | `/api/student/attempts/{id}/questions` | token | The frozen paper, sanitized |
+| POST | `/api/student/attempts/{id}/answers` | token | Save one answer (upsert) |
+| POST | `/api/student/attempts/{id}/integrity-events` | token | Report a browser signal |
+| POST | `/api/student/attempts/{id}/submit` | token | Finalize (idempotent) |
+| GET | `/api/student/attempts/{id}/result` | token | The student's own result |
+
+Every student request resolves the attempt and then finalizes it if the server
+clock has passed `expires_at`, before doing anything else.
 
 
 ### `GET /api/public/quizzes/{public_code}`
@@ -209,10 +224,19 @@ No auth. Returns only what the pre-exam screen needs:
   "owner_name": "Dr Rao", "status": "PUBLISHED" }
 ```
 
-No question text, no variant IDs, no pool size.
+No question text, no variant IDs, no pool size, and no internal quiz id. Only a
+`PUBLISHED` quiz resolves: a draft or closed quiz returns a 404 byte-identical
+to that of a code that never existed, so a guessed code reveals nothing.
 
-### `POST /api/attempts/start`
-Rate limited. Body `{ "public_code": "8F7K2P", "student_name": "...", "student_email": "..." }`.
+`max_integrity_violations` is included deliberately. A student is entitled to
+know the rules before consenting to be monitored, and knowing the budget does
+not help them defeat it, because the count is kept server-side.
+
+### `POST /api/public/quizzes/{public_code}/attempts`
+Rate limited (`RATE_LIMIT_ATTEMPT_START`, default 10/minute). Body
+`{ "student_name": "...", "student_email": "..." }` and nothing else: the schema
+forbids extra fields, so supplying a seed, an attempt id, a start time or a
+question list is a 422 rather than something silently ignored.
 
 Server: validates publication, enforces the one-attempt rule, generates the seed,
 stamps `started_at`/`expires_at` from the server clock, draws one approved variant
@@ -220,18 +244,26 @@ per family, shuffles order and options, persists `attempt_questions`, returns:
 
 ```json
 { "attempt_id": "uuid", "attempt_token": "opaque-token-shown-once",
-  "server_time": "2026-09-20T14:02:11Z", "expires_at": "2026-09-20T14:22:11Z",
-  "quiz": { "title": "...", "allow_backtracking": true, "question_count": 10 } }
+  "server_time": "...", "started_at": "...", "expires_at": "...",
+  "seconds_remaining": 1200, "question_count": 10,
+  "allow_backtracking": true, "security_level": "SECURE" }
 ```
 
-409 `ATTEMPT_ALREADY_EXISTS` if this student already attempted this quiz.
+201 on success. `attempt_token` is returned once and never again; only its
+SHA-256 hash is stored. 409 `ATTEMPT_ALREADY_EXISTS` if this student already
+attempted this quiz, enforced by `UNIQUE (quiz_id, student_email)` so that two
+simultaneous starts cannot both create a paper.
 
-### `GET /api/attempts/{id}`
-Attempt state plus `server_time` and `seconds_remaining` — the frontend
-resynchronizes its countdown against this and never against `Date.now()`.
+### `GET /api/student/attempts/{id}`
+Attempt state plus `server_time` and `seconds_remaining`. The exam runner
+resynchronizes its countdown against this and never against `Date.now()`. Also
+carries `violation_count`, `max_integrity_violations` and `integrity_status`, so
+a student can see where they stand; all three are read from the attempt row.
 
-### `GET /api/attempts/{id}/questions`
-The frozen paper, in this student's order, options already permuted:
+### `GET /api/student/attempts/{id}/questions`
+The frozen paper, in this student's order, options already permuted. Read from
+`attempt_questions` and never re-planned, so a refresh returns the identical
+paper with options in the identical order:
 
 ```json
 { "questions": [
@@ -240,23 +272,37 @@ The frozen paper, in this student's order, options already permuted:
     "selected_answer": { "displayed_index": 2 } } ] }
 ```
 
-Never present: `correct_option`, `explanation`, `variant_id`, `options_order_json`,
-`numeric_answer_json`.
+Never present: `correct_option`, `explanation`, `variant_id`,
+`options_order_json`, `numeric_answer_json`. The schema has no field capable of
+holding them, so a handler passing the wrong object still cannot leak one.
 
-### `POST /api/attempts/{id}/answer`
+### `POST /api/student/attempts/{id}/answers`
 Body `{ "attempt_question_id": "uuid", "selected_answer": { "displayed_index": 2 } }`.
-Validates ownership, attempt active, question belongs to this attempt, not
-expired, format valid. Upserts. Response `{ "saved": true, "answered_at": "...", "server_time": "..." }`
-— correctness is **not** returned.
+Validates ownership, attempt active, question belongs to *this* attempt, not
+expired, format valid. Upserts, so answering twice leaves one row.
 
-### `POST /api/attempts/{id}/event`
+A `selected_answer` containing `is_correct`, `score`, `percentage`,
+`correct_option` or `grade` is rejected with 400 `GRADING_FIELD_REJECTED`
+rather than ignored, so a client probing the boundary gets a clear answer.
+
+Response: `{ "saved": true, "attempt_question_id": "...", "answered_at": "...",
+"server_time": "...", "seconds_remaining": N }`. Correctness is **not**
+returned, which would turn the exam into an oracle; `answers.is_correct` stays
+NULL until finalization.
+
+### `POST /api/student/attempts/{id}/integrity-events`
 Body `{ "event_type": "TAB_HIDDEN", "client_reported_at": "...", "metadata": {} }`.
-Severity is assigned server-side from the policy table; a client-supplied severity
-is discarded. Response:
+There is no `severity` and no `violation_count` field, so a client cannot
+understate its own signals. `TIME_EXPIRED`, `AUTO_SUBMISSION_TRIGGERED` and
+`ATTEMPT_RESUMED` are server-generated: a client reporting one gets 400
+`SERVER_ONLY_EVENT`. Metadata is bounded (20 keys, 500 chars per value) before
+storage. Severity comes from the table in
+[security.md](./security.md#integrity-signals). Response:
 
 ```json
-{ "recorded": true, "violation_total": 2, "integrity_status": "WARNING",
-  "action_taken": "WARNING_ISSUED", "auto_submitted": false }
+{ "recorded": true, "violation_total": 2, "max_integrity_violations": 2,
+  "integrity_status": "WARNING", "action_taken": "WARNING_ISSUED",
+  "auto_submitted": false, "attempt_status": "IN_PROGRESS" }
 ```
 
 When the cumulative severity exceeds `max_integrity_violations`, the server marks
@@ -265,14 +311,23 @@ finalizes — inside the same request. `auto_submitted: true` tells the browser 
 navigate to the submitted screen; it does not ask the browser to do the
 submitting.
 
-### `POST /api/attempts/{id}/submit`
-Idempotent under a row lock. Returns `AttemptResult`; `score` and `percentage` are
-`null` unless the quiz sets `show_score_after_submission`.
+### `POST /api/student/attempts/{id}/submit`
+Empty body. Idempotent under `SELECT ... FOR UPDATE`: a second submit blocks on
+the lock, observes the terminal state and returns the same stored result.
+Returns `AttemptResultOut`; `score`, `max_score` and `percentage` are `null`
+unless the quiz sets `show_score_after_submission`.
 
-### `GET /api/attempts/{id}/results`
-Student-facing summary with the same score-visibility rule. The teacher variant of
-this view (full answer key, timeline, integrity events) is served under the quiz
-results route and requires quiz ownership.
+Submitting an attempt whose clock has already run out returns status
+`TIME_EXPIRED`, not `SUBMITTED`.
+
+### `GET /api/student/attempts/{id}/result`
+The student's own result, with the same score-visibility rule. 409
+`ATTEMPT_NOT_FINALIZED` before submission. A token may read its own finished
+attempt, because a student is entitled to their result page, but may not write
+to it.
+
+The teacher view of an attempt (answer key, timeline, integrity events) ships in
+a later phase under the quiz results route and requires quiz ownership.
 
 ## Results (teacher)
 
@@ -296,9 +351,9 @@ persisted and the endpoint stays safe to retry.
 
 | Route | Default |
 |---|---|
-| `POST /api/attempts/start` | 10/minute per IP |
-| `POST /api/attempts/{id}/answer` | 240/minute per attempt |
-| `POST /api/attempts/{id}/event` | 300/minute per attempt |
+| `POST /api/public/quizzes/{code}/attempts` | 10/minute per IP |
+| `POST /api/student/attempts/{id}/answers` | 240/minute per attempt |
+| `POST /api/student/attempts/{id}/integrity-events` | 300/minute per attempt |
 | `POST /api/questions/{id}/generate-variants` | 20/minute per user |
 | everything else | 120/minute |
 

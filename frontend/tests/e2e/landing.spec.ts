@@ -27,10 +27,14 @@ test('teacher routes redirect an anonymous visitor to sign-in', async ({ page })
   await expect(page).toHaveURL('/')
 })
 
-test('a public quiz link shows the rules before any exam content', async ({ page }) => {
+test('an unknown quiz code shows a plain unavailable message', async ({ page }) => {
+  // The public page now fetches the real quiz. With no backend running (or an
+  // unknown code) it must fail closed and say nothing about whether the code
+  // exists.
   await page.goto('/q/8F7K2P')
-  await expect(page.getByText('8F7K2P')).toBeVisible()
-  await expect(page.getByText('Before you begin')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Quiz unavailable' })).toBeVisible()
+  const body = (await page.textContent('body')) ?? ''
+  expect(body).not.toContain('correct')
 })
 
 test('unknown routes render the not-found page', async ({ page }) => {

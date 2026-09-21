@@ -26,7 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.clock import ensure_aware, utcnow
 from app.core.logging import Event, log_event
@@ -86,9 +87,33 @@ def finalize_attempt(
 
     # Imported here to keep the module import graph free of a cycle between
     # grading and finalization.
+    from app.db.models import AttemptQuestion
     from app.services.grading import grade_attempt
 
-    graded = grade_attempt(list(attempt.questions))
+    # Load the paper fresh, with answers eagerly attached. Grading must not use
+    # ``attempt.questions``: if that collection was loaded before the answers
+    # were written, each question's ``answer`` link is stale and grade_attempt
+    # sees None, silently scoring a submitted answer as unanswered. A student
+    # losing marks for an answer they did submit is the worst failure this
+    # engine can have, so the read is explicit rather than incidental.
+    # populate_existing is essential, not decorative: these rows are usually
+    # already in the session's identity map with `answer` loaded as None from
+    # before the student answered, and an eager loader will not overwrite an
+    # already-populated attribute. Without it, grading silently sees an
+    # answered question as unanswered.
+    questions = list(
+        db.scalars(
+            select(AttemptQuestion)
+            .where(AttemptQuestion.attempt_id == attempt.id)
+            .options(
+                selectinload(AttemptQuestion.answer),
+                selectinload(AttemptQuestion.variant),
+            )
+            .order_by(AttemptQuestion.position)
+            .execution_options(populate_existing=True)
+        )
+    )
+    graded = grade_attempt(questions)
 
     attempt.score = graded.score
     attempt.max_score = graded.max_score

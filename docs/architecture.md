@@ -171,12 +171,13 @@ sequenceDiagram
 
     S->>A: GET /api/public/quizzes/{public_code}
     A-->>S: title, duration, question_count, rules only
-    S->>A: POST /api/attempts/start with public_code, name, email
+    S->>A: POST /api/public/quizzes/{code}/attempts with name, email
     A->>DB: SELECT quiz WHERE public_code AND status = PUBLISHED
     A->>DB: One-attempt check via unique index
     A->>A: seed = secrets.randbits(63)
     A->>A: started_at = server now, expires_at = started_at + duration
-    A->>DB: Pick one APPROVED variant per family, seeded PRNG, shuffle order and options
+    A->>DB: Sample families, then one assignable variant each, seeded PRNG
+    A->>A: Shuffle question order and option order from the same seed
     A->>DB: INSERT attempt_questions (the frozen exam)
     A-->>S: attempt_id, attempt_token, questions without correct_option
 ```
@@ -184,6 +185,15 @@ sequenceDiagram
 The exam is **frozen at creation**: `attempt_questions` rows are never
 regenerated. Reloading the page replays the same paper; a different student
 starting from the same URL gets a different draw because the seed differs.
+
+Families are sampled first and one variant is drawn per family, so a student is
+never given two variants of the same question. `ORDER BY random() LIMIT n` is
+deliberately not used — it would do exactly that. The seed comes from
+`secrets.randbits(63)` server-side; no request field can supply one, and the
+whole paper is reproducible from the seed stored on the attempt row.
+
+No AI provider is called here. Generation happens during quiz preparation, so an
+exam never depends on a third party being reachable.
 
 ## 7. Exam lifecycle
 
@@ -263,6 +273,9 @@ app/services/      Business rules. The only place that mutates exam state.
                      variant_lifecycle.py    the variant state machine
                      selection.py            eligibility + seeded paper planning
                      attempt_access.py       student attempt authorization
+                     attempt_service.py      attempt creation, paper assembly,
+                                             sanitized delivery, answer saving
+                     integrity_policy.py     severity table and threshold policy
                      attempt_finalization.py idempotent finalization
                      grading.py              scoring, at finalization only
 app/db/models/     SQLAlchemy ORM, enums, constraints

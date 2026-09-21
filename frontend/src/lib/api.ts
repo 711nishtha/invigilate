@@ -239,6 +239,128 @@ export interface FamilyCreatePayload {
   generation_config_json?: Record<string, unknown>
 }
 
+// --- Student engine types --------------------------------------------------
+
+export interface PublicQuiz {
+  public_code: string
+  title: string
+  description: string | null
+  duration_seconds: number
+  question_count: number
+  security_level: SecurityLevel
+  max_integrity_violations: number
+  allow_backtracking: boolean
+  requires_fullscreen: boolean
+  shows_score_after_submission: boolean
+  owner_name: string | null
+}
+
+export interface AttemptStart {
+  attempt_id: string
+  /** Shown once. Persisted in sessionStorage so a refresh can resume. */
+  attempt_token: string
+  server_time: string
+  started_at: string
+  expires_at: string
+  seconds_remaining: number
+  question_count: number
+  allow_backtracking: boolean
+  security_level: SecurityLevel
+}
+
+export type AttemptStatus =
+  | 'IN_PROGRESS'
+  | 'SUBMITTED'
+  | 'AUTO_SUBMITTED'
+  | 'TIME_EXPIRED'
+  | 'ABANDONED'
+
+export type IntegrityStatus = 'CLEAN' | 'WARNING' | 'FLAGGED'
+
+export interface AttemptState {
+  attempt_id: string
+  status: AttemptStatus
+  server_time: string
+  started_at: string
+  expires_at: string
+  /** Authoritative. The UI counts down from this, never from its own clock. */
+  seconds_remaining: number
+  question_count: number
+  answered_count: number
+  allow_backtracking: boolean
+  security_level: SecurityLevel
+  integrity_status: IntegrityStatus
+  violation_count: number
+  max_integrity_violations: number
+  is_terminal: boolean
+}
+
+/** A question as served. There is no correct-answer field, by construction. */
+export interface StudentQuestion {
+  attempt_question_id: string
+  position: number
+  question_type: QuestionType
+  question_text: string
+  options: string[] | null
+  selected_answer: Record<string, unknown> | null
+}
+
+export interface AttemptQuestions {
+  attempt_id: string
+  server_time: string
+  seconds_remaining: number
+  questions: StudentQuestion[]
+}
+
+export interface AnswerSaved {
+  saved: true
+  attempt_question_id: string
+  answered_at: string
+  server_time: string
+  seconds_remaining: number
+}
+
+export type IntegrityEventType =
+  | 'TAB_HIDDEN'
+  | 'TAB_VISIBLE'
+  | 'WINDOW_BLUR'
+  | 'WINDOW_FOCUS'
+  | 'FULLSCREEN_ENTER'
+  | 'FULLSCREEN_EXIT'
+  | 'COPY_ATTEMPT'
+  | 'CUT_ATTEMPT'
+  | 'PASTE_ATTEMPT'
+  | 'RIGHT_CLICK'
+  | 'KEYBOARD_SHORTCUT_ATTEMPT'
+  | 'NETWORK_DISCONNECTED'
+  | 'NETWORK_RECONNECTED'
+
+export interface IntegrityEventResult {
+  recorded: boolean
+  violation_total: number
+  max_integrity_violations: number
+  integrity_status: IntegrityStatus
+  action_taken: string
+  /** The server already finalized the attempt; the browser is being told. */
+  auto_submitted: boolean
+  attempt_status: AttemptStatus
+}
+
+export interface AttemptResult {
+  attempt_id: string
+  status: AttemptStatus
+  submitted_at: string | null
+  server_time: string
+  question_count: number
+  answered_count: number
+  integrity_status: IntegrityStatus
+  violation_count: number
+  score_visible: boolean
+  score: number | null
+  max_score: number | null
+  percentage: number | null
+}
+
 export const api = {
   health: () => request<HealthStatus>('/health', { auth: 'none' }),
 
@@ -286,4 +408,63 @@ export const api = {
     request<Variant>(`/variants/${variantId}/reinstate`, { method: 'POST' }),
   deleteVariant: (variantId: string) =>
     request<void>(`/variants/${variantId}`, { method: 'DELETE' }),
+
+  // --- Public (no auth) ----------------------------------------------------
+  getPublicQuiz: (code: string) =>
+    request<PublicQuiz>(`/public/quizzes/${encodeURIComponent(code)}`, { auth: 'none' }),
+
+  startAttempt: (code: string, body: { student_name: string; student_email: string }) =>
+    request<AttemptStart>(`/public/quizzes/${encodeURIComponent(code)}/attempts`, {
+      method: 'POST',
+      body,
+      auth: 'none',
+    }),
+
+  // --- Student (attempt token) ---------------------------------------------
+  getAttempt: (attemptId: string, attemptToken: string) =>
+    request<AttemptState>(`/student/attempts/${attemptId}`, { auth: 'attempt', attemptToken }),
+
+  getAttemptQuestions: (attemptId: string, attemptToken: string) =>
+    request<AttemptQuestions>(`/student/attempts/${attemptId}/questions`, {
+      auth: 'attempt',
+      attemptToken,
+    }),
+
+  saveAnswer: (
+    attemptId: string,
+    attemptToken: string,
+    body: { attempt_question_id: string; selected_answer: Record<string, unknown> },
+  ) =>
+    request<AnswerSaved>(`/student/attempts/${attemptId}/answers`, {
+      method: 'POST',
+      body,
+      auth: 'attempt',
+      attemptToken,
+    }),
+
+  reportIntegrityEvent: (
+    attemptId: string,
+    attemptToken: string,
+    body: { event_type: IntegrityEventType; client_reported_at?: string; metadata?: Record<string, unknown> },
+  ) =>
+    request<IntegrityEventResult>(`/student/attempts/${attemptId}/integrity-events`, {
+      method: 'POST',
+      body,
+      auth: 'attempt',
+      attemptToken,
+    }),
+
+  submitAttempt: (attemptId: string, attemptToken: string) =>
+    request<AttemptResult>(`/student/attempts/${attemptId}/submit`, {
+      method: 'POST',
+      body: {},
+      auth: 'attempt',
+      attemptToken,
+    }),
+
+  getAttemptResult: (attemptId: string, attemptToken: string) =>
+    request<AttemptResult>(`/student/attempts/${attemptId}/result`, {
+      auth: 'attempt',
+      attemptToken,
+    }),
 }

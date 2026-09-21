@@ -22,6 +22,8 @@ variants · Resend for result email · openpyxl for XLSX.
 | A served question never changes | Editing an approved variant supersedes it with a new version |
 | Generated questions need human approval | `GENERATED -> VALIDATED -> APPROVED`; no automatic path |
 | Same link, different exam | Seeded draw from a pool of approved variants, frozen at attempt creation |
+| A running exam never changes | `attempt_questions` references the exact variant served; edits supersede |
+| Integrity signals cannot be understated | Severity assigned server-side; the request has no severity field |
 | The browser cannot cheat the clock | `started_at` / `expires_at` written from the server clock and checked on every request |
 | The browser cannot cheat the score | Grading happens once, server-side, at finalization |
 | The answer key never leaks | Absent from every student-facing schema; enforced by a test |
@@ -139,11 +141,10 @@ only and must never appear in a `VITE_`-prefixed variable.
 |---|---|---|
 | 1 | Infrastructure: repo, backend, frontend, Docker, Supabase, migrations, auth, dashboard shell | done |
 | 2 | Quiz engine: quiz CRUD, question families, variants, teacher review, AI generation, publish lifecycle | done |
-| 3 | AI hardening: live Gemini verification, regeneration UX, prompt iteration | next |
-| 4 | Student exam: public link, attempt creation, randomization, server timer, grading, submission | |
-| 5 | Integrity: event stream, violation policy, auto-submission | |
-| 6 | Results: dashboard, timeline, XLSX, Resend email | |
-| 7 | Hardening: authorization, rate limits, concurrency, Playwright, deployment | |
+| 3 | Student assessment engine: public link, attempt creation, assignment, server timer, answers, integrity events, auto-submit, grading, result | done |
+| 4 | Results: teacher dashboard, attempt timeline, XLSX export, Resend email | next |
+| 5 | Live Gemini verification and prompt iteration | pending a credential |
+| 6 | Hardening: deployment, load behaviour, operational runbook | |
 
 ## Documentation
 

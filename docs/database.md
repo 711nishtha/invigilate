@@ -211,6 +211,26 @@ Index: `(attempt_id, occurred_at)` — powers the attempt timeline view.
 5. `SELECT ... FOR UPDATE` on `attempts` during submission — exactly one finalization.
 
 
+### Why no attempt snapshot table exists
+
+A served paper is historical assessment data: a student who sat question V3 must
+be able to have it re-read and re-marked against exactly the text they saw.
+
+**No snapshot of the question is stored on the attempt**, because the immutable
+variant model already guarantees it. `attempt_questions.variant_id` references
+the exact row that was served, and that row can never change underneath it:
+
+- editing an `APPROVED` or `PUBLISHED` variant supersedes it with a new version
+  rather than rewriting it (see below);
+- rejecting one changes only `validation_status`, never the text or options;
+- `ON DELETE RESTRICT` on `attempt_questions.variant_id` refuses deletion;
+- `options_order_json` on the attempt row pins the option order too.
+
+Duplicating the question text onto every attempt would cost storage and add a
+second copy to keep honest, for a property the schema already has. Tests prove a
+running attempt is unchanged after the teacher supersedes, rejects and attempts
+to delete the variant it was served.
+
 ### Variant immutability and versioning
 
 **Decision: an approved variant is never rewritten. Editing supersedes it.**
@@ -265,6 +285,7 @@ where it is tested.
 | 9 | `bigint` for `attempts.seed` | Seeded draw | A 63-bit seed would overflow a 32-bit integer | `test_core.py::TestSeeds` |
 | 10 | Transactional DDL | Alembic migrations | A failed migration could leave a half-applied schema | manual, on deploy |
 | 11 | Enum type replacement (`ALTER TYPE ... USING`) | migration `0002_variant_lifecycle` | The variant lifecycle could not be migrated without data loss | manual, on deploy |
+| 12 | Row lock held across an integrity event that may auto-submit | `POST /integrity-events` | A signal crossing the threshold could race a manual submit into a double finalization | `integration/test_student_concurrency.py` |
 
 ### Transaction boundaries
 
