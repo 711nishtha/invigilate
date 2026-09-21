@@ -221,12 +221,39 @@ real PostgreSQL with two concurrent connections. They are **skipped** when
 ## 9. API hardening
 
 CORS allowlist from `CORS_ORIGINS` (no `*` when credentials are involved);
-per-route rate limits; request body cap (`MAX_REQUEST_BYTES`, default 256 KiB)
+per-route rate limits (see below); request body cap (`MAX_REQUEST_BYTES`, default 256 KiB)
 rejecting oversized payloads with 413; Pydantic validation at every boundary with
 `extra="forbid"` on student-facing input; SQLAlchemy parameterized queries
 throughout (no string-built SQL); `metadata_json` size-capped before persistence;
 security headers (`X-Content-Type-Options`, `Referrer-Policy`,
 `X-Frame-Options: DENY`); `/docs` and `/openapi.json` disabled in production.
+
+### Rate limiting cannot be switched off
+
+Rate limiting is a control, not a preference:
+
+- There is **no setting** that disables it. `limiter.enabled` is never assigned
+  by application code, and a test asserts that.
+- An empty or unparseable `RATE_LIMIT_*` value is **rejected at settings load**.
+  An empty string would otherwise make slowapi's `default_limits` an empty list
+  and silently remove the global limit — exactly what a blank Render variable
+  produces.
+- In `production` and `staging`, startup calls `assert_rate_limiting_active()`
+  and the process **refuses to boot** if the limiter is disabled or has no
+  limits.
+- The test suite disables the limiter through an autouse fixture, because
+  slowapi's limiter is process-global and keys on one IP for the whole suite.
+  Tests assert that this state does not leak between cases, and an opt-in
+  `rate_limited` fixture exercises the real limits.
+- Both 429 paths — the middleware's default limit and a per-route decorator —
+  return the same documented envelope. The handler is deliberately synchronous:
+  slowapi's middleware discards a coroutine handler and falls back to its own
+  response shape.
+
+The stub AI and email providers are guarded the same way: `AI_PROVIDER=stub` or
+`EMAIL_PROVIDER=stub` in production or staging refuses to start, because they
+would otherwise hand teachers fabricated questions and silently drop result
+email with no error anywhere.
 
 ## 10. Secrets
 

@@ -300,6 +300,12 @@ docker compose up -d db
 TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5433/secure_quiz     pytest tests/integration -v
 ```
 
+**Status:** executed against PostgreSQL 16.14 at the Phase 2 exit gate — 12/12
+passing, and the full suite runs 419/419 with no skips under that URL. Both
+migrations were also applied from zero, including the `0002` enum replacement
+with live rows present, and `alembic revision --autogenerate` reports no drift
+between the models and the migration history.
+
 ### pgBouncer
 
 The application connects through Supabase's transaction pooler (port 6543) with

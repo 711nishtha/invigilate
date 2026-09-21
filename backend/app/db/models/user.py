@@ -31,7 +31,10 @@ class User(Base):
     # without depending on the citext extension.
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
     role: Mapped[UserRole] = mapped_column(
-        pg_enum(UserRole, "user_role"), nullable=False, default=UserRole.TEACHER
+        pg_enum(UserRole, "user_role"),
+        nullable=False,
+        default=UserRole.TEACHER,
+        server_default=UserRole.TEACHER.value,
     )
     created_at: Mapped[datetime] = created_at_column()
 

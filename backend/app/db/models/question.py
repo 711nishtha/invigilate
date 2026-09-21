@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,9 +49,11 @@ class QuestionFamily(Base):
     learning_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Variant count, numeric template, parameter ranges, dedup threshold.
     generation_config_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONColumn, nullable=False, default=dict
+        JSONColumn, nullable=False, default=dict, server_default=text("'{}'")
     )
-    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    position: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = created_at_column()
 
     quiz: Mapped["Quiz"] = relationship(back_populates="question_families")
@@ -86,11 +89,13 @@ class QuestionVariant(Base):
         pg_enum(GenerationStatus, "generation_status"),
         nullable=False,
         default=GenerationStatus.AI_GENERATED,
+        server_default=GenerationStatus.AI_GENERATED.value,
     )
     validation_status: Mapped[VariantStatus] = mapped_column(
         pg_enum(VariantStatus, "variant_status"),
         nullable=False,
         default=VariantStatus.GENERATED,
+        server_default=VariantStatus.GENERATED.value,
     )
     # SHA-256 of normalized text + sorted options. Backs exact-duplicate
     # rejection at the database level.
@@ -107,7 +112,9 @@ class QuestionVariant(Base):
     # creates a new row and points the old one here. attempt_questions keeps
     # referencing the exact row it was served, which is what stops history
     # changing underneath a finished exam.
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
         GUID, ForeignKey("question_variants.id", ondelete="SET NULL"), nullable=True
     )
@@ -131,6 +138,9 @@ class QuestionVariant(Base):
         ),
         # The hot path when assembling a paper.
         Index("ix_question_variants_family_id_validation_status", "family_id", "validation_status"),
+        # Declared here as well as in migration 0002 so that the model is a true
+        # description of the schema; otherwise autogenerate proposes dropping it.
+        Index("ix_question_variants_family_id_superseded_by_id", "family_id", "superseded_by_id"),
     )
 
     @property

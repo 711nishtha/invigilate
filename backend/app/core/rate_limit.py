@@ -29,6 +29,10 @@ def rate_limit_key(request: Request) -> str:
     return f"ip:{get_remote_address(request)}"
 
 
+# `enabled` is deliberately not configurable. There is no environment variable
+# that turns rate limiting off, so a production deploy cannot be talked out of
+# it. The test suite toggles `limiter.enabled` in-process via a fixture; that
+# attribute is never written by application code.
 limiter = Limiter(
     key_func=rate_limit_key,
     default_limits=[settings.rate_limit_default],
@@ -36,7 +40,43 @@ limiter = Limiter(
 )
 
 
-async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> Response:
+class RateLimitingDisabled(RuntimeError):
+    """Raised at startup if production would run without rate limiting."""
+
+
+def assert_rate_limiting_active() -> None:
+    """Fail the boot rather than serve production traffic unprotected.
+
+    Three ways rate limiting could silently vanish, all checked here:
+    a test fixture leaking `enabled = False` into a real process, an empty
+    `default_limits` list, and a limit string that parses to nothing. The
+    settings validator already rejects the last two at load time; this is the
+    belt-and-braces check at the point of no return.
+    """
+    problems: list[str] = []
+    if not limiter.enabled:
+        problems.append("limiter.enabled is False")
+    if not limiter._default_limits:  # noqa: SLF001 - no public accessor exists
+        problems.append("limiter has no default limits")
+    if not settings.rate_limit_default.strip():
+        problems.append("RATE_LIMIT_DEFAULT is empty")
+
+    if problems:
+        raise RateLimitingDisabled(
+            "Rate limiting is not active: " + "; ".join(problems)
+        )
+
+
+def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> Response:
+    """Render a 429 in the documented error envelope.
+
+    Deliberately synchronous. slowapi's middleware looks up the registered
+    handler but discards it if it is a coroutine function, silently falling
+    back to its own `{"error": "Rate limit exceeded: ..."}` string. A sync
+    handler is used by both paths, so a 429 from a default limit and one from
+    a per-route decorator have the same shape. Starlette runs sync handlers in
+    a threadpool, so nothing blocks the event loop.
+    """
     retry_after = getattr(exc, "retry_after", None) or 60
     return JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,

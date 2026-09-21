@@ -327,7 +327,8 @@ class TestNativeEnums:
             "security_level",
             "question_type",
             "generation_status",
-            "validation_status",
+            # Renamed from validation_status by 0002_variant_lifecycle.
+            "variant_status",
             "attempt_status",
             "integrity_status",
             "integrity_event_type",
@@ -340,6 +341,9 @@ class TestNativeEnums:
             ).all()
         }
         assert expected <= present, f"missing enum types: {expected - present}"
+        assert "validation_status" not in present, (
+            "0002 must drop the old enum type, not leave both behind"
+        )
 
 
 class TestTransactionBoundaries:

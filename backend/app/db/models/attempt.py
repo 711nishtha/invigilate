@@ -55,7 +55,10 @@ class Attempt(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     status: Mapped[AttemptStatus] = mapped_column(
-        pg_enum(AttemptStatus, "attempt_status"), nullable=False, default=AttemptStatus.IN_PROGRESS
+        pg_enum(AttemptStatus, "attempt_status"),
+        nullable=False,
+        default=AttemptStatus.IN_PROGRESS,
+        server_default=AttemptStatus.IN_PROGRESS.value,
     )
     # Drives the seeded draw; stored so a paper can be explained after the fact.
     seed: Mapped[int] = mapped_column(BigInt, nullable=False)
@@ -66,9 +69,14 @@ class Attempt(Base):
     percentage: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
 
     # Cumulative severity, not a count of events.
-    integrity_violation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    integrity_violation_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     integrity_status: Mapped[IntegrityStatus] = mapped_column(
-        pg_enum(IntegrityStatus, "integrity_status"), nullable=False, default=IntegrityStatus.CLEAN
+        pg_enum(IntegrityStatus, "integrity_status"),
+        nullable=False,
+        default=IntegrityStatus.CLEAN,
+        server_default=IntegrityStatus.CLEAN.value,
     )
     # Suppresses duplicate result emails on a repeated submit.
     results_emailed_at: Mapped[datetime | None] = mapped_column(

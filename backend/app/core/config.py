@@ -75,6 +75,39 @@ class Settings(BaseSettings):
     attempt_grace_seconds: int = 5
     default_variants_per_question: int = 5
 
+    @field_validator(
+        "rate_limit_default",
+        "rate_limit_attempt_start",
+        "rate_limit_answer",
+        "rate_limit_event",
+        "rate_limit_generation",
+    )
+    @classmethod
+    def _validate_rate_limit(cls, value: str) -> str:
+        """Reject a rate limit that would silently disable limiting.
+
+        An empty string makes slowapi's default_limits an empty list, which
+        turns rate limiting off with no error at all — exactly the kind of
+        misconfiguration a blank Render environment variable produces. Parsing
+        the value here means a typo fails at boot instead of quietly removing a
+        control.
+        """
+        from limits import parse_many
+
+        text = (value or "").strip()
+        if not text:
+            raise ValueError(
+                "Rate limit must not be empty. Use a value like '120/minute'; "
+                "rate limiting cannot be disabled by configuration."
+            )
+        try:
+            parsed = parse_many(text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid rate limit {text!r}: {exc}") from exc
+        if not parsed:
+            raise ValueError(f"Invalid rate limit {text!r}: no limit parsed.")
+        return text
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
@@ -96,6 +129,25 @@ class Settings(BaseSettings):
     def migration_database_url(self) -> str:
         """Alembic needs the direct connection, not the pgBouncer pooler."""
         return self.alembic_database_url or self.database_url
+
+    def production_misconfigurations(self) -> list[str]:
+        """Settings that are valid but must never be used in production.
+
+        The stub providers exist so tests never call a paid API. Left enabled
+        on a real deploy they would silently hand teachers fabricated questions
+        and silently drop result emails, with no error anywhere. Naming them
+        here turns a silent wrong behaviour into a refused boot.
+        """
+        problems: list[str] = []
+        if self.ai_provider == "stub":
+            problems.append(
+                "AI_PROVIDER=stub generates fake questions and must not run in production"
+            )
+        if self.email_provider == "stub":
+            problems.append(
+                "EMAIL_PROVIDER=stub silently discards email and must not run in production"
+            )
+        return problems
 
     def missing_production_secrets(self) -> list[str]:
         """Names of required settings that are still empty.

@@ -6,7 +6,19 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    false,
+    text,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, created_at_column, uuid_pk
@@ -35,24 +47,36 @@ class Quiz(Base):
     # number of question families the quiz holds.
     question_count: Mapped[int] = mapped_column(Integer, nullable=False)
     security_level: Mapped[SecurityLevel] = mapped_column(
-        pg_enum(SecurityLevel, "security_level"), nullable=False, default=SecurityLevel.SECURE
+        pg_enum(SecurityLevel, "security_level"),
+        nullable=False,
+        default=SecurityLevel.SECURE,
+        server_default=SecurityLevel.SECURE.value,
     )
     # Cumulative severity budget, not a count of events.
-    max_integrity_violations: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
-    randomization_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    allow_backtracking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    max_integrity_violations: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=2, server_default="2"
+    )
+    randomization_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+    allow_backtracking: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
     show_score_after_submission: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
+        Boolean, nullable=False, default=False, server_default=false()
     )
     status: Mapped[QuizStatus] = mapped_column(
-        pg_enum(QuizStatus, "quiz_status"), nullable=False, default=QuizStatus.DRAFT
+        pg_enum(QuizStatus, "quiz_status"),
+        nullable=False,
+        default=QuizStatus.DRAFT,
+        server_default=QuizStatus.DRAFT.value,
     )
     # Optional publish requirements, e.g.
     # {"required_topics": ["Trees"], "required_difficulties": ["hard"]}.
     # Empty by default so a quiz is not boxed in by assumptions made here; the
     # assignment engine reads the same keys when selecting variants.
     coverage_config_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONColumn, nullable=False, default=dict
+        JSONColumn, nullable=False, default=dict, server_default=text("'{}'")
     )
     created_at: Mapped[datetime] = created_at_column()
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

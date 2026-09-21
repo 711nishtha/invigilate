@@ -16,6 +16,7 @@ from app.core.logging import configure_logging, get_logger
 from app.core.rate_limit import (
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
+    assert_rate_limiting_active,
     limiter,
     rate_limit_handler,
 )
@@ -33,9 +34,23 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             # Fail at boot rather than at the first teacher login.
             raise RuntimeError(message)
         logger.warning(message, extra={"missing": missing})
+    # Rate limiting is a production control, not a preference. A process that
+    # would serve real traffic without it does not start. The same applies to
+    # the stub providers, which exist only so tests never call a paid API.
+    if settings.environment in ("production", "staging"):
+        assert_rate_limiting_active()
+        misconfigured = settings.production_misconfigurations()
+        if misconfigured:
+            raise RuntimeError("Unsafe production configuration: " + "; ".join(misconfigured))
+
     logger.info(
         "Application starting",
-        extra={"environment": settings.environment, "version": settings.app_version},
+        extra={
+            "environment": settings.environment,
+            "version": settings.app_version,
+            "rate_limiting": limiter.enabled,
+            "rate_limit_default": settings.rate_limit_default,
+        },
     )
     yield
     logger.info("Application shutting down")

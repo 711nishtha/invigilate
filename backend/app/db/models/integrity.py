@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, uuid_pk
@@ -29,16 +29,23 @@ class IntegrityEvent(Base):
     )
     # Assigned server-side from the policy table. A client-supplied severity is
     # discarded.
-    severity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    severity: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     # Server receipt time — the authoritative ordering of the timeline.
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # Kept for forensics only; never used for a decision.
     client_reported_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONColumn, nullable=False, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONColumn, nullable=False, default=dict, server_default=text("'{}'")
+    )
     action_taken: Mapped[IntegrityAction] = mapped_column(
-        pg_enum(IntegrityAction, "integrity_action"), nullable=False, default=IntegrityAction.LOGGED
+        pg_enum(IntegrityAction, "integrity_action"),
+        nullable=False,
+        default=IntegrityAction.LOGGED,
+        server_default=IntegrityAction.LOGGED.value,
     )
 
     attempt: Mapped["Attempt"] = relationship(back_populates="integrity_events")
