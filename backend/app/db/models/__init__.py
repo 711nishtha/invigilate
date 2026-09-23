@@ -6,6 +6,7 @@ what Alembic autogenerate and the test fixtures rely on.
 
 from app.db.base import Base
 from app.db.models.attempt import Answer, Attempt, AttemptQuestion
+from app.db.models.delivery import DeliveryKind, DeliveryStatus, ResultDelivery
 from app.db.models.enums import (
     AttemptStatus,
     GenerationStatus,
@@ -29,6 +30,8 @@ __all__ = [
     "AttemptQuestion",
     "AttemptStatus",
     "Base",
+    "DeliveryKind",
+    "DeliveryStatus",
     "GenerationStatus",
     "IntegrityAction",
     "IntegrityEvent",
@@ -38,6 +41,7 @@ __all__ = [
     "QuestionType",
     "QuestionVariant",
     "Quiz",
+    "ResultDelivery",
     "QuizStatus",
     "SecurityLevel",
     "User",

@@ -4,6 +4,7 @@ import { RequireTeacher } from './components/RequireTeacher'
 import { TeacherLayout } from './components/TeacherLayout'
 import { LandingPage } from './pages/LandingPage'
 import { NotFoundPage } from './pages/NotFoundPage'
+import { AttemptDetailPage } from './pages/teacher/AttemptDetailPage'
 import { DashboardPage } from './pages/teacher/DashboardPage'
 import { QuizDetailPage } from './pages/teacher/QuizDetailPage'
 import { QuizListPage } from './pages/teacher/QuizListPage'
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="quizzes/:id/questions" element={<QuizQuestionsPage />} />
         <Route path="quizzes/:id/variants" element={<QuizVariantsPage />} />
         <Route path="quizzes/:id/results" element={<QuizResultsPage />} />
+        <Route path="attempts/:attemptId" element={<AttemptDetailPage />} />
       </Route>
 
       {/* Student routes: no Supabase session required. */}

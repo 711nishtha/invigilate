@@ -80,6 +80,9 @@ export function QuizListPage() {
                 <Link to={`/teacher/quizzes/${quiz.id}/questions`} className="btn-secondary">
                   Questions
                 </Link>
+                <Link to={`/teacher/quizzes/${quiz.id}/results`} className="btn-secondary">
+                  Results
+                </Link>
                 <Link to={`/teacher/quizzes/${quiz.id}`} className="btn-secondary">
                   Settings
                 </Link>

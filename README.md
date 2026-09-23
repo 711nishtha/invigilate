@@ -30,6 +30,8 @@ variants · Resend for result email · openpyxl for XLSX.
 | One attempt per student | `UNIQUE (quiz_id, student_email)` in PostgreSQL |
 | Double submit is safe | `SELECT ... FOR UPDATE`, idempotent finalization |
 | AI output is never trusted | Strict validation, dedup, mandatory human approval |
+| An email failure never costs a result | Delivery is a separate table; results are durable first |
+| Exports are built from the database | Generated server-side; nothing authoritative in the browser |
 
 ## Repository layout
 
@@ -142,8 +144,8 @@ only and must never appear in a `VITE_`-prefixed variable.
 | 1 | Infrastructure: repo, backend, frontend, Docker, Supabase, migrations, auth, dashboard shell | done |
 | 2 | Quiz engine: quiz CRUD, question families, variants, teacher review, AI generation, publish lifecycle | done |
 | 3 | Student assessment engine: public link, attempt creation, assignment, server timer, answers, integrity events, auto-submit, grading, result | done |
-| 4 | Results: teacher dashboard, attempt timeline, XLSX export, Resend email | next |
-| 5 | Live Gemini verification and prompt iteration | pending a credential |
+| 4 | Results: teacher dashboard, attempt detail, XLSX export, Resend email, storage, load test | done |
+| 5 | Live provider verification: Gemini, Resend, Supabase | pending credentials |
 | 6 | Hardening: deployment, load behaviour, operational runbook | |
 
 ## Documentation

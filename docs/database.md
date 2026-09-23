@@ -265,6 +265,35 @@ The alternative — forbidding edits outright — was rejected because teachers 
 need to fix a typo, and forcing "reject and rewrite from scratch" loses the
 provenance chain that `version` and `superseded_by_id` preserve.
 
+### result_deliveries
+
+One row per attempt to email a quiz's results to its owner.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `quiz_id` | uuid FK -> quizzes.id, ON DELETE CASCADE | |
+| `requested_by_id` | uuid FK -> users.id NULL | who pressed the button |
+| `kind` | `delivery_kind` NOT NULL | `RESULTS_EMAIL` |
+| `status` | `delivery_status` NOT NULL DEFAULT `PENDING` | `PENDING` / `SENT` / `FAILED` |
+| `recipient` | varchar(320) NOT NULL | recorded so "who received this?" stays answerable |
+| `provider` / `provider_message_id` | varchar NULL | what a support ticket quotes |
+| `attempt_count` | int NOT NULL DEFAULT 0 | how many attempts the report covered |
+| `error_code` / `error_detail` | varchar / text NULL | error class and a truncated detail, never a key |
+| `attempts_made` | int NOT NULL DEFAULT 0 | retry counter |
+| `export_object_path` | varchar(500) NULL | set only when `RETAIN_EXPORTS` is on |
+| `created_at` / `sent_at` / `failed_at` | timestamptz | |
+
+**Why a separate table.** A result email is an operational side effect with its
+own lifecycle, retries and failure history; a quiz is academic record. Columns
+on `quizzes` would mean a failed send mutated exam data, and would lose the
+history of which send covered which attempts.
+
+The invariant this table protects: **a delivery failure never alters a result.**
+Rows are written after the results are already durable, and nothing here is read
+when grading or finalizing. Tests assert that a failed send leaves `attempts`,
+`answers` and `integrity_events` byte-identical.
+
 ## PostgreSQL-specific behaviour
 
 The unit test suite runs on in-memory SQLite for speed. PostgreSQL is the only

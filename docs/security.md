@@ -460,7 +460,39 @@ silent timeline, which a teacher can see is anomalous but which is not on its
 own a finding of misconduct. No webcam, gaze, screen-recording or AI-based
 classification exists in this system.
 
-## 16. Known limitations
+## 16. External service failure
+
+Three external services can fail. None of them can corrupt or roll back an exam
+result, and each failure is contained differently:
+
+| Service | Failure effect | Why a result is safe |
+|---|---|---|
+| **Gemini** | Variant generation returns 200 with `error_code`; the family is untouched | Generation happens at quiz preparation. A published quiz never calls it, and the student engine never calls it at all. |
+| **Resend** | `POST /email-results` returns 200 with `sent: false`; a `FAILED` delivery row records why | Results are already durable before the send is attempted. The delivery table is separate from exam data, and the teacher can retry. |
+| **Supabase Storage** | Upload is skipped, the email still sends with the workbook attached | Retention is a convenience: the workbook is regenerable from the database at any time. |
+
+Every provider boundary maps transport and protocol failures to typed
+application errors, which reach the client through the ordinary error envelope.
+Error details are truncated to 300 characters before logging, because a provider
+that echoes a request back would otherwise put an `Authorization` header into
+the logs.
+
+### Export confidentiality
+
+An export holds student names, emails, answers and marks. Therefore:
+
+- generated server-side and streamed to an authenticated teacher, never
+  assembled in the browser;
+- retention is **off by default**; when on, the bucket is private and downloads
+  go through a short-lived signed URL minted only after server-side
+  authorization;
+- object paths are namespaced `quizzes/{quiz_id}/results/{delivery_id}.xlsx`, so
+  one quiz's export cannot overwrite or expose another's;
+- the result email links to the authenticated dashboard rather than embedding a
+  file URL — an emailed link is forwarded, logged and indexed far more easily
+  than a session is. The workbook rides as an attachment instead.
+
+## 17. Known limitations
 
 1. A second device (phone, laptop) is invisible to the browser.
 2. A virtual machine or screen-sharing tool outside the browser is invisible.
@@ -472,6 +504,10 @@ classification exists in this system.
 5. **Attempt tokens can be shared.** A student who passes their token to
    somebody else has shared their attempt. There is no rotation or revocation;
    the remedy today is that the quiz owner closes the quiz.
+6. **A result email is delivered to the quiz owner's stored address.** If that
+   address is wrong or compromised, the workbook goes with it. The recipient
+   cannot be overridden per request, which is deliberate, but it does mean
+   account hygiene is the control.
 5. Screen and camera capture are opt-in browser streams, not proctoring, and stop
    the moment the student denies permission.
 

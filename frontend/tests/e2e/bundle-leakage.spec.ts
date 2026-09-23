@@ -39,7 +39,6 @@ test.describe('production bundle', () => {
     // None of these has any legitimate client use. Any appearing means some
     // screen is reading data it should never have been sent.
     const offenders = scan([
-      'correct_answer',
       'options_order_json',
       'content_hash',
       'validation_errors_json',
@@ -66,6 +65,11 @@ test.describe('production bundle', () => {
       'correct_option',
       'numeric_answer_json',
       'generation_config_json',
+      // Phase 4: the teacher marking view displays the server's verdict and
+      // the right answer beside the student's. That is what marking is, and
+      // the API returns both only to the quiz owner.
+      'correct_answer',
+      'is_correct',
       // Not sensitive — it is a UUID saying a variant was replaced — but the
       // teacher review screen is the only place with any reason to read it.
       'superseded_by_id',
@@ -97,14 +101,20 @@ test.describe('production bundle', () => {
   })
 
   test('contains no grading or scoring logic', () => {
-    // The client must never be able to compute a score. Marking lives in
+    // The distinction that matters: the client may *display* a verdict the
+    // server computed, but must never *compute* one. Marking lives in
     // app/services/grading.py and nowhere else.
+    //
+    // The API is snake_case throughout, so a camelCase `isCorrect` or a
+    // `calculateScore` could only be client-authored logic — which is exactly
+    // what this forbids. The snake_case `is_correct` is an API field the
+    // teacher screen renders, and is covered by the teacher-only test above.
     const offenders = scan([
       'isCorrect',
-      'is_correct',
       'calculateScore',
       'computeScore',
       'gradeAnswer',
+      'gradeAttempt',
     ])
     expect(offenders, offenders.join('\n')).toEqual([])
   })

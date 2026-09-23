@@ -361,6 +361,127 @@ export interface AttemptResult {
   percentage: number | null
 }
 
+// --- Results, export and delivery ------------------------------------------
+
+export interface ScoreBand {
+  band: string
+  count: number
+}
+
+/** Dashboard counters. Averages are null when there is nothing to average. */
+export interface QuizStats {
+  attempt_count: number
+  in_progress_count: number
+  submitted_count: number
+  auto_submitted_count: number
+  expired_count: number
+  finalized_count: number
+  completion_rate: number | null
+  average_percentage: number | null
+  highest_percentage: number | null
+  lowest_percentage: number | null
+  average_score: number | null
+  max_score: number | null
+  clean_count: number
+  warning_count: number
+  flagged_count: number
+  integrity_event_count: number
+  score_distribution: ScoreBand[]
+}
+
+export interface AttemptRow {
+  attempt_id: string
+  student_name: string
+  student_email: string
+  status: AttemptStatus
+  started_at: string
+  submitted_at: string | null
+  duration_seconds: number | null
+  score: number | null
+  max_score: number | null
+  percentage: number | null
+  integrity_status: IntegrityStatus
+  violation_count: number
+  answered_count: number
+  question_count: number
+}
+
+export interface QuizResults {
+  quiz_id: string
+  title: string
+  public_code: string | null
+  question_count: number
+  stats: QuizStats
+  attempts: AttemptRow[]
+}
+
+export interface AttemptQuestionDetail {
+  position: number
+  question_type: QuestionType
+  topic: string | null
+  difficulty: string | null
+  original_question: string
+  question_text: string
+  options: string[] | null
+  selected_answer: string | null
+  correct_answer: string | null
+  is_correct: boolean | null
+  answered_at: string | null
+}
+
+export interface TeacherIntegrityEvent {
+  event_type: string
+  severity: number
+  occurred_at: string
+  client_reported_at: string | null
+  action_taken: string
+  metadata: Record<string, unknown>
+}
+
+export interface AttemptDetail {
+  attempt_id: string
+  quiz_id: string
+  quiz_title: string
+  student_name: string
+  student_email: string
+  status: AttemptStatus
+  started_at: string
+  submitted_at: string | null
+  duration_seconds: number | null
+  score: number | null
+  max_score: number | null
+  percentage: number | null
+  integrity_status: IntegrityStatus
+  violation_count: number
+  questions: AttemptQuestionDetail[]
+  integrity_events: TeacherIntegrityEvent[]
+}
+
+export type DeliveryStatus = 'PENDING' | 'SENT' | 'FAILED'
+
+export interface Delivery {
+  id: string
+  status: DeliveryStatus
+  recipient: string
+  provider: string | null
+  provider_message_id: string | null
+  attempt_count: number
+  attempts_made: number
+  error_code: string | null
+  error_detail: string | null
+  retained: boolean
+  created_at: string
+  sent_at: string | null
+  failed_at: string | null
+}
+
+export interface SendResultsResult {
+  sent: boolean
+  delivery: Delivery
+  error_code: string | null
+  error_message: string | null
+}
+
 export const api = {
   health: () => request<HealthStatus>('/health', { auth: 'none' }),
 
@@ -467,4 +588,51 @@ export const api = {
       auth: 'attempt',
       attemptToken,
     }),
+
+  // --- Teacher results -----------------------------------------------------
+  getQuizResults: (quizId: string) => request<QuizResults>(`/quizzes/${quizId}/results`),
+
+  getAttemptDetail: (attemptId: string) =>
+    request<AttemptDetail>(`/attempts/${attemptId}/detail`),
+
+  listDeliveries: (quizId: string) => request<Delivery[]>(`/quizzes/${quizId}/deliveries`),
+
+  emailResults: (quizId: string) =>
+    request<SendResultsResult>(`/quizzes/${quizId}/email-results`, {
+      method: 'POST',
+      body: {},
+    }),
+
+  /**
+   * Downloads the workbook.
+   *
+   * Uses fetch directly rather than the JSON helper because the response is a
+   * binary stream. The report is generated server-side from database truth;
+   * nothing authoritative is assembled in the browser.
+   */
+  downloadExport: async (quizId: string, filename: string): Promise<void> => {
+    const token = await getAccessToken()
+    if (!token) throw new ApiError(401, 'NOT_AUTHENTICATED', 'Your session has expired.')
+
+    const response = await fetch(`${env.apiUrl}/api/quizzes/${quizId}/export`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as ApiErrorBody | null
+      throw new ApiError(
+        response.status,
+        payload?.error?.code ?? 'EXPORT_FAILED',
+        payload?.error?.message ?? 'Could not generate the export.',
+      )
+    }
+
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.click()
+    URL.revokeObjectURL(url)
+  },
 }

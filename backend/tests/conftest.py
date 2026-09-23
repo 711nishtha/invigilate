@@ -20,6 +20,7 @@ os.environ.setdefault("SUPABASE_JWT_SECRET", "test-jwt-secret-not-a-real-secret"
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
 os.environ.setdefault("AI_PROVIDER", "stub")
 os.environ.setdefault("EMAIL_PROVIDER", "stub")
+os.environ.setdefault("STORAGE_PROVIDER", "stub")
 
 import jwt  # noqa: E402
 import pytest  # noqa: E402
@@ -181,3 +182,24 @@ def rate_limited():
         pass
     yield limiter
     limiter.enabled = False
+
+
+@pytest.fixture(autouse=True)
+def stub_external_providers():
+    """Email and storage stubs for every test.
+
+    Same reasoning as the AI stub: no test run may send a real email, write to
+    a real bucket, or spend money, even if configuration drifts.
+    """
+    from app.email.factory import set_email_provider
+    from app.email.stub import StubEmailProvider
+    from app.storage.factory import set_storage_provider
+    from app.storage.stub import StubStorageProvider
+
+    email = StubEmailProvider()
+    storage = StubStorageProvider()
+    set_email_provider(email)
+    set_storage_provider(storage)
+    yield {"email": email, "storage": storage}
+    set_email_provider(None)
+    set_storage_provider(None)

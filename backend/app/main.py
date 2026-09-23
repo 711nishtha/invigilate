@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.routes import auth, health, questions, quizzes, student
+from app.api.routes import auth, health, questions, quizzes, results, student
 from app.core.config import settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
@@ -97,6 +97,7 @@ def create_app() -> FastAPI:
     api.include_router(questions.quiz_scoped)
     api.include_router(questions.family_scoped)
     api.include_router(questions.variant_scoped)
+    api.include_router(results.router)
     api.include_router(student.public_router)
     api.include_router(student.student_router)
     app.include_router(api)

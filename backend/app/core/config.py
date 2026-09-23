@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     ai_request_timeout_seconds: int = 60
 
+    # --- Storage -----------------------------------------------------------
+    storage_provider: Literal["supabase", "stub"] = "supabase"
+    # Retain generated exports in Supabase Storage. Off by default: the
+    # workbook is regenerable from the database at any time, so retention is a
+    # convenience rather than a requirement, and not storing student marks is
+    # the safer default.
+    retain_exports: bool = False
+    export_signed_url_ttl_seconds: int = 300
+
     # --- Email -------------------------------------------------------------
     email_provider: Literal["resend", "stub"] = "resend"
     resend_api_key: str = ""
@@ -69,6 +78,11 @@ class Settings(BaseSettings):
     rate_limit_answer: str = "240/minute"
     rate_limit_event: str = "300/minute"
     rate_limit_generation: str = "20/minute"
+    # Export builds a whole workbook; email sends one. Both are cheap to
+    # trigger and expensive to serve, and a double-click must not become a
+    # mail storm.
+    rate_limit_export: str = "10/minute"
+    rate_limit_email: str = "5/minute"
     max_request_bytes: int = 262_144
 
     # --- Exam engine -------------------------------------------------------
@@ -81,6 +95,8 @@ class Settings(BaseSettings):
         "rate_limit_answer",
         "rate_limit_event",
         "rate_limit_generation",
+        "rate_limit_export",
+        "rate_limit_email",
     )
     @classmethod
     def _validate_rate_limit(cls, value: str) -> str:
@@ -147,6 +163,11 @@ class Settings(BaseSettings):
             problems.append(
                 "EMAIL_PROVIDER=stub silently discards email and must not run in production"
             )
+        if self.storage_provider == "stub" and self.retain_exports:
+            problems.append(
+                "STORAGE_PROVIDER=stub keeps exports in memory only and must not run "
+                "in production when RETAIN_EXPORTS is enabled"
+            )
         return problems
 
     def missing_production_secrets(self) -> list[str]:
@@ -165,6 +186,8 @@ class Settings(BaseSettings):
             required["GEMINI_API_KEY"] = self.gemini_api_key
         if self.email_provider == "resend":
             required["RESEND_API_KEY"] = self.resend_api_key
+        if self.retain_exports and self.storage_provider == "supabase":
+            required["SUPABASE_SERVICE_ROLE_KEY"] = self.supabase_service_role_key
         return [name for name, value in required.items() if not value]
 
 

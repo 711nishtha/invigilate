@@ -331,21 +331,69 @@ a later phase under the quiz results route and requires quiz ownership.
 
 ## Results (teacher)
 
+**Implemented and tested.** Ownership-scoped like every other teacher route: a
+quiz or attempt the caller does not own returns 404.
+
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/quizzes/{id}/attempts` | Attempt rows for the results table |
-| GET | `/api/quizzes/{id}/stats` | Dashboard counters, average score, flagged count |
-| GET | `/api/attempts/{id}/detail` | Full detail: questions, answers, key, timeline, events |
-| POST | `/api/quizzes/{id}/export` | Build the four-sheet workbook |
+| GET | `/api/quizzes/{id}/results` | Statistics plus the attempt table |
+| GET | `/api/attempts/{id}/detail` | Full detail: paper, answers, key, timeline |
+| POST | `/api/quizzes/{id}/export` | Stream the four-sheet workbook |
+| GET | `/api/quizzes/{id}/deliveries` | Email delivery history |
 | POST | `/api/quizzes/{id}/email-results` | Email the workbook to the quiz owner |
+| GET | `/api/deliveries/{id}/export` | Signed URL for a retained export |
 
-`POST /export` accepts `{ "delivery": "download" | "storage" }`. `download`
-streams `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`;
-`storage` uploads to the Supabase `exports` bucket and returns a signed URL.
+### `GET /api/quizzes/{id}/results`
 
-`POST /email-results` returns 200 `{ "sent": true, "message_id": "..." }` or 502
-`{ "sent": false, "error": "..." }` — and in the failure case the export is still
-persisted and the endpoint stays safe to retry.
+Counters, score distribution, integrity summary and one row per attempt. With
+no attempts every counter is zero and every average is `null`, so a client can
+render a real empty state rather than a fabricated zero.
+
+### `GET /api/attempts/{id}/detail`
+
+The exact paper served, the student's answers, the correct answers, per-question
+correctness and the integrity timeline. Carries the answer key **by design** —
+this is the marking view — and is confined by ownership, not by omission.
+
+### `POST /api/quizzes/{id}/export`
+
+Builds the workbook server-side from database truth and streams it as
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`. Nothing
+touches the container filesystem, which Render destroys on every deploy. Rate
+limited (`RATE_LIMIT_EXPORT`, default 10/minute).
+
+Sheets: **Summary** (quiz info, attempt counts, score statistics, integrity
+summary), **Answers** (one row per student per question, with the selected and
+correct answers), **Integrity** (every recorded signal), **Question statistics**
+(presented / answered / correct / incorrect / unanswered / accuracy).
+
+Never present in any sheet: attempt tokens, token hashes, seeds, API keys, or
+any data from another quiz. A test asserts this.
+
+### `POST /api/quizzes/{id}/email-results`
+
+Empty body — the recipient is the quiz owner, read from the database. Accepting
+an address would turn the endpoint into an open relay for student marks, so the
+schema forbids extra fields.
+
+Returns **200 even when delivery fails**, because the results are already
+durable and a provider outage is a reportable event rather than a server error:
+
+```json
+{ "sent": false, "error_code": "EmailTimeout",
+  "error_message": "Resend did not respond within 20s.",
+  "delivery": { "status": "FAILED", "attempts_made": 1, "error_code": "EmailTimeout" } }
+```
+
+Rate limited (`RATE_LIMIT_EMAIL`, default 5/minute) so a double-click cannot
+become a mail storm. Retry is safe: each attempt writes a new delivery row and
+nothing in `attempts`, `answers` or `integrity_events` is touched.
+
+### `GET /api/deliveries/{id}/export`
+
+Returns a short-lived signed URL (default 300s) for an export retained in
+Supabase Storage. Authorization happens server-side before any URL is minted;
+the bucket is private. 404 `EXPORT_NOT_RETAINED` when `RETAIN_EXPORTS` was off.
 
 ## Rate limits
 
@@ -355,6 +403,8 @@ persisted and the endpoint stays safe to retry.
 | `POST /api/student/attempts/{id}/answers` | 240/minute per attempt |
 | `POST /api/student/attempts/{id}/integrity-events` | 300/minute per attempt |
 | `POST /api/questions/{id}/generate-variants` | 20/minute per user |
+| `POST /api/quizzes/{id}/export` | 10/minute per user |
+| `POST /api/quizzes/{id}/email-results` | 5/minute per user |
 | everything else | 120/minute |
 
 Exceeding a limit returns 429 with `Retry-After`. Event-stream throttling drops

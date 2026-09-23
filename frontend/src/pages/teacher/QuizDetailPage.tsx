@@ -62,6 +62,9 @@ export function QuizDetailPage() {
           <Link to={`/teacher/quizzes/${quiz.id}/questions`} className="btn-secondary">
             Questions
           </Link>
+          <Link to={`/teacher/quizzes/${quiz.id}/results`} className="btn-secondary">
+            Results
+          </Link>
           {quiz.status === 'DRAFT' && (
             <button
               type="button"
