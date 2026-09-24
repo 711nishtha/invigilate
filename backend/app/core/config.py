@@ -49,8 +49,13 @@ class Settings(BaseSettings):
     # --- AI ----------------------------------------------------------------
     ai_provider: Literal["gemini", "stub"] = "gemini"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
-    ai_request_timeout_seconds: int = 60
+    gemini_model: str = "gemini-3.1-flash-lite"
+    # Measured against the live API: a flash-lite generation takes ~55-70s and
+    # the cost is dominated by fixed model overhead, not by variant count
+    # (1 variant 62s, 5 variants 68s). The previous 60s default timed out on
+    # essentially every real call. 120s leaves headroom without making a failed
+    # call unbearable to wait out.
+    ai_request_timeout_seconds: int = 120
 
     # --- Storage -----------------------------------------------------------
     storage_provider: Literal["supabase", "stub"] = "supabase"
@@ -149,12 +154,39 @@ class Settings(BaseSettings):
     def production_misconfigurations(self) -> list[str]:
         """Settings that are valid but must never be used in production.
 
-        The stub providers exist so tests never call a paid API. Left enabled
-        on a real deploy they would silently hand teachers fabricated questions
-        and silently drop result emails, with no error anywhere. Naming them
-        here turns a silent wrong behaviour into a refused boot.
+        Two classes of problem, both of which would otherwise boot cleanly and
+        fail confusingly later:
+
+        *Stub providers.* They exist so tests never call a paid API. Left
+        enabled on a real deploy they would silently hand teachers fabricated
+        questions and silently drop result emails, with no error anywhere.
+
+        *Development defaults.* Every URL below has a localhost default so that
+        `uvicorn app.main:app` just works on a laptop. Those defaults are
+        non-empty, so a missing-secret check cannot catch them: a deploy that
+        forgot DATABASE_URL would start, point at a localhost database, and
+        500 on every request. CORS would reject the real frontend, and result
+        emails would link to localhost.
         """
         problems: list[str] = []
+
+        localhost_markers = ("localhost", "127.0.0.1", "0.0.0.0")
+
+        def is_local(value: str) -> bool:
+            return any(marker in value for marker in localhost_markers)
+
+        if is_local(self.database_url):
+            problems.append(
+                "DATABASE_URL still points at localhost; set the Supabase connection string"
+            )
+        if is_local(self.frontend_url):
+            problems.append(
+                "FRONTEND_URL still points at localhost; result email links would be unusable"
+            )
+        if not self.cors_origins or any(is_local(origin) for origin in self.cors_origins):
+            problems.append(
+                "CORS_ORIGINS still contains localhost; the deployed frontend would be blocked"
+            )
         if self.ai_provider == "stub":
             problems.append(
                 "AI_PROVIDER=stub generates fake questions and must not run in production"

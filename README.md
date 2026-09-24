@@ -145,11 +145,12 @@ only and must never appear in a `VITE_`-prefixed variable.
 | 2 | Quiz engine: quiz CRUD, question families, variants, teacher review, AI generation, publish lifecycle | done |
 | 3 | Student assessment engine: public link, attempt creation, assignment, server timer, answers, integrity events, auto-submit, grading, result | done |
 | 4 | Results: teacher dashboard, attempt detail, XLSX export, Resend email, storage, load test | done |
-| 5 | Live provider verification: Gemini, Resend, Supabase | pending credentials |
+| 5 | Live provider verification | Gemini **verified**; Resend and Supabase pending credentials |
 | 6 | Hardening: deployment, load behaviour, operational runbook | |
 
 ## Documentation
 
+[Runbook](docs/runbook.md) — the exact deployment steps ·
 [Architecture](docs/architecture.md) · [Security](docs/security.md) ·
 [Database](docs/database.md) · [API](docs/api.md) ·
 [Deployment](docs/deployment.md) · [AI generation](docs/ai-generation.md)

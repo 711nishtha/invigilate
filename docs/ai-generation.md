@@ -199,7 +199,25 @@ transition table in `services/variant_lifecycle.py` has no path from
 or future code path can make approval automatic. `POST /publish` fails if any
 family that could be drawn has no assignable variant.
 
-## 10. Cost and failure behaviour
+## 10. Live verification
+
+Verified against the real API on 2026-09-24 via `backend/scripts/gemini_smoke.py`:
+authentication, model availability, request format, structured JSON output,
+parsing, backend validation of the generated content, and error mapping
+(a real 401 and a real 503 both mapped correctly, with bounded retries).
+
+Two measured facts that shape configuration:
+
+- **Latency is ~55-70 seconds and is fixed overhead, not per-variant** (1
+  variant 62s, 5 variants 68s). `AI_REQUEST_TIMEOUT_SECONDS` is therefore 120;
+  the previous 60s default timed out on essentially every real call. Asking for
+  more variants in one request is nearly free.
+- **`gemini-3.1-flash-lite` was returning HTTP 503 "high demand"** throughout
+  the audit, while `gemini-flash-lite-latest` and `gemini-3.5-flash-lite`
+  generated successfully. The model is an environment variable; see
+  [runbook.md](./runbook.md#6-gemini).
+
+## 11. Cost and failure behaviour
 
 Generation is per-family and on demand, so a teacher pays for what they generate.
 Provider failures surface as `VARIANT_GENERATION_FAILED` with the reason and

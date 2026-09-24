@@ -164,8 +164,82 @@ class TestStubProvidersCannotRunInProduction:
         assert any("EMAIL_PROVIDER=stub" in p for p in problems)
 
     def test_real_providers_are_not_flagged(self) -> None:
-        settings = Settings(environment="production", ai_provider="gemini", email_provider="resend")
+        """Real providers plus real URLs is the only clean production shape."""
+        settings = Settings(**PRODUCTION_READY)
         assert settings.production_misconfigurations() == []
+
+
+# A production configuration with nothing left at a development default.
+# `_env_file=None` keeps these hermetic: without it, Settings() reads a
+# developer's backend/.env and the assertions depend on whatever is on their
+# machine.
+PRODUCTION_READY = dict(
+    _env_file=None,
+    environment="production",
+    ai_provider="gemini",
+    email_provider="resend",
+    database_url="postgresql+psycopg://u:p@aws-0-eu-west-2.pooler.supabase.com:6543/postgres",
+    frontend_url="https://quiz.example.edu",
+    cors_origins=["https://quiz.example.edu"],
+)
+
+
+class TestDevelopmentDefaultsCannotReachProduction:
+    """Every URL has a localhost default so a laptop just works.
+
+    Those defaults are non-empty, so a missing-secret check cannot catch them:
+    a deploy that forgot DATABASE_URL would start, point at a localhost
+    database and 500 on every request.
+    """
+
+    def test_a_localhost_database_is_refused(self) -> None:
+        settings = Settings(**{**PRODUCTION_READY, "database_url": "postgresql+psycopg://postgres:postgres@localhost:5432/secure_quiz"})
+        assert any("DATABASE_URL" in p for p in settings.production_misconfigurations())
+
+    def test_a_localhost_frontend_url_is_refused(self) -> None:
+        """Result emails would link somewhere only the developer can open."""
+        settings = Settings(**{**PRODUCTION_READY, "frontend_url": "http://localhost:5173"})
+        assert any("FRONTEND_URL" in p for p in settings.production_misconfigurations())
+
+    def test_localhost_cors_origins_are_refused(self) -> None:
+        """The deployed frontend would be CORS-blocked by its own backend."""
+        settings = Settings(**{**PRODUCTION_READY, "cors_origins": ["http://localhost:5173"]})
+        assert any("CORS_ORIGINS" in p for p in settings.production_misconfigurations())
+
+    def test_empty_cors_origins_are_refused(self) -> None:
+        settings = Settings(**{**PRODUCTION_READY, "cors_origins": []})
+        assert any("CORS_ORIGINS" in p for p in settings.production_misconfigurations())
+
+    def test_a_forgotten_deploy_is_caught_completely(self) -> None:
+        """Operator sets the secrets but leaves every URL at its dev value.
+
+        The localhost values are stated explicitly rather than relying on the
+        defaults: conftest puts DATABASE_URL in os.environ, which outranks the
+        model default, so an implicit version of this test would silently
+        assert less than it appears to.
+        """
+        settings = Settings(
+            _env_file=None,
+            environment="production",
+            ai_provider="gemini",
+            email_provider="resend",
+            database_url="postgresql+psycopg://postgres:postgres@localhost:5432/secure_quiz",
+            frontend_url="http://localhost:5173",
+            cors_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        )
+        problems = settings.production_misconfigurations()
+        assert len(problems) == 3, problems
+        assert {"DATABASE_URL", "FRONTEND_URL", "CORS_ORIGINS"} == {
+            problem.split()[0] for problem in problems
+        }
+
+    def test_development_is_unaffected(self) -> None:
+        """Localhost is correct on a laptop; only startup for prod/staging checks."""
+        import pathlib as _pathlib
+
+        source = _pathlib.Path("app/main.py").read_text(encoding="utf-8")
+        assert '"production", "staging"' in source
+        assert "production_misconfigurations()" in source
 
     def test_startup_refuses_an_unsafe_production_configuration(self) -> None:
         source = pathlib.Path("app/main.py").read_text(encoding="utf-8")
