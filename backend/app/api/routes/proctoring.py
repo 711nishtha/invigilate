@@ -51,7 +51,7 @@ def _owned_attempt(db: DbSession, attempt_id: str, teacher) -> tuple[Attempt, Qu
     attempt = db.scalar(
         select(Attempt)
         .join(Quiz, Quiz.id == Attempt.quiz_id)
-        .where(Attempt.id == parse_uuid(attempt_id), Quiz.owner_id == teacher.id)
+        .where(Attempt.id == parse_uuid(attempt_id, what="attempt"), Quiz.owner_id == teacher.id)
         .options(selectinload(Attempt.integrity_events))
     )
     if attempt is None:

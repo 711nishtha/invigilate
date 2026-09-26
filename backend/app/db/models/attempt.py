@@ -110,8 +110,13 @@ class Attempt(Base):
     )
     # The pre-exam check this attempt was authorized by, if any. Its presence is
     # the audit trail for "the server, not the browser, allowed this to start".
+    # attempts and precheck_sessions reference each other, which is a cycle a
+    # DDL sort cannot resolve. use_alter adds this constraint after both tables
+    # exist and drops it first, which is also what the Alembic migration does.
     precheck_session_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID, ForeignKey("precheck_sessions.id", ondelete="SET NULL"), nullable=True
+        GUID,
+        ForeignKey("precheck_sessions.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
     )
     # A teacher's conclusion about the proctoring timeline. Separate from
     # integrity_status, which is arithmetic: this one is a person's judgement,

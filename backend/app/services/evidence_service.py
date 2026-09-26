@@ -51,9 +51,19 @@ from app.services.proctoring_policy import ProctoringPolicy
 from app.storage.base import StorageError, StorageProvider
 from app.storage.factory import get_storage_provider
 
-# A still frame, not a film. Anything larger is refused before it reaches the
-# network: the endpoint is unauthenticated apart from an attempt token, so it
-# must not double as free object storage.
+# A still frame, not a film. The endpoint is authenticated by an attempt token
+# alone, so it must not double as free object storage.
+#
+# These are ceilings, not the effective limit. ``BodySizeLimitMiddleware``
+# rejects any request over ``MAX_REQUEST_BYTES`` (256 KB by default) before a
+# route ever runs, so ``max_bytes_for`` takes the smaller of the two. Declaring
+# a 512 KB limit here and letting the middleware return 413 at 256 KB would be
+# a limit that documents itself incorrectly.
+#
+# A consequence worth stating: clip upload is unreachable at the default
+# MAX_REQUEST_BYTES. Active clip recording is not shipped (see
+# docs/proctoring.md), and enabling it would require raising that setting
+# deliberately rather than discovering the ceiling in production.
 MAX_SNAPSHOT_BYTES = 512 * 1024
 MAX_CLIP_BYTES = 8 * 1024 * 1024
 
@@ -74,11 +84,16 @@ class EvidenceRejected(Exception):
 
 
 def max_bytes_for(kind: EvidenceKind) -> int:
-    return (
+    """The limit that actually applies, not the one this module would prefer.
+
+    Capped by the global request-body limit so the two can never disagree.
+    """
+    declared = (
         MAX_CLIP_BYTES
         if kind in (EvidenceKind.CAMERA_CLIP, EvidenceKind.SCREEN_CLIP)
         else MAX_SNAPSHOT_BYTES
     )
+    return min(declared, settings.max_request_bytes)
 
 
 def object_path(attempt_id: uuid.UUID, kind: EvidenceKind, extension: str) -> str:

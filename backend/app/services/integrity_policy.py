@@ -175,6 +175,11 @@ def record_event(
     if severity > 0 and not server_generated:
         window = proctoring_policy.repeat_window(event_type)
         if window is not None:
+            # Sessions run with autoflush=False, so an event added earlier in
+            # this same transaction would be invisible to the query below and
+            # the debounce would silently do nothing. Flushing first makes the
+            # window hold within a request as well as across requests.
+            db.flush()
             previous = db.scalar(
                 select(IntegrityEvent.occurred_at)
                 .where(

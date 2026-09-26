@@ -56,12 +56,18 @@ class FinalizationResult:
 _REASON_STATUS = {
     "MANUAL": AttemptStatus.SUBMITTED,
     "AUTO_INTEGRITY": AttemptStatus.AUTO_SUBMITTED,
+    # Phase 5. A proctoring stream-loss action ends the exam through the same
+    # path and lands in the same terminal state: it is an auto-submission with
+    # a different cause, not a different kind of outcome. Grading is identical,
+    # which is what keeps a monitoring failure from touching a mark.
+    "AUTO_PROCTORING": AttemptStatus.AUTO_SUBMITTED,
     "TIME_EXPIRED": AttemptStatus.TIME_EXPIRED,
 }
 
 _REASON_EVENT = {
     "MANUAL": Event.MANUAL_SUBMISSION,
     "AUTO_INTEGRITY": Event.AUTO_SUBMISSION,
+    "AUTO_PROCTORING": Event.AUTO_SUBMISSION,
     "TIME_EXPIRED": Event.TIME_EXPIRED,
 }
 
