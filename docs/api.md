@@ -11,11 +11,18 @@ Two independent credential types:
 | Caller | Credential | Header |
 |---|---|---|
 | Teacher / admin | Supabase Auth JWT | `Authorization: Bearer <supabase_jwt>` |
-| Student in an exam | Attempt token issued by `POST /attempts/start` | `X-Attempt-Token: <token>` |
+| Student in an exam | Attempt token issued at attempt creation | `X-Attempt-Token: <token>` |
+| Student in a pre-exam check | Precheck token issued by `POST /precheck` | `X-Precheck-Token: <token>` |
 
 The attempt token is a high-entropy opaque string; only its SHA-256 hash is
 stored. It authorizes exactly one attempt and nothing else — it cannot read
 other attempts, other quizzes, or any teacher route.
+
+The precheck token has the same construction and the same scope: one pre-exam
+check session, nothing else. Both are resolved token-first — the query filters on
+the token hash and only then compares the id the caller asked for — so
+substituting someone else's id produces a query that never touches their row.
+Every authorization failure on either is the same 404.
 
 ## Error shape
 
@@ -238,6 +245,12 @@ Rate limited (`RATE_LIMIT_ATTEMPT_START`, default 10/minute). Body
 forbids extra fields, so supplying a seed, an attempt id, a start time or a
 question list is a 422 rather than something silently ignored.
 
+**Refuses a proctored quiz.** A quiz whose `proctoring_mode` is not `STANDARD`
+returns 409 `PRECHECK_REQUIRED` here, and no attempt row is created. This is the
+bypass prevention for the pre-exam check: there is no header or payload field
+that relaxes it, and the only route into a proctored exam is
+`POST /api/public/precheck/{id}/start`.
+
 Server: validates publication, enforces the one-attempt rule, generates the seed,
 stamps `started_at`/`expires_at` from the server clock, draws one approved variant
 per family, shuffles order and options, persists `attempt_questions`, returns:
@@ -246,7 +259,8 @@ per family, shuffles order and options, persists `attempt_questions`, returns:
 { "attempt_id": "uuid", "attempt_token": "opaque-token-shown-once",
   "server_time": "...", "started_at": "...", "expires_at": "...",
   "seconds_remaining": 1200, "question_count": 10,
-  "allow_backtracking": true, "security_level": "SECURE" }
+  "allow_backtracking": true, "security_level": "SECURE",
+  "proctoring_mode": "STANDARD", "heartbeat_interval_seconds": 0 }
 ```
 
 201 on success. `attempt_token` is returned once and never again; only its
@@ -328,6 +342,107 @@ to it.
 
 The teacher view of an attempt (answer key, timeline, integrity events) ships in
 a later phase under the quiz results route and requires quiz ownership.
+
+## Pre-exam security check (proctored quizzes)
+
+Four calls, in order. Only the last creates an attempt, and only the server can
+decide that it may. Full rationale in [proctoring.md](./proctoring.md).
+
+### `POST /api/public/quizzes/{public_code}/precheck`
+Rate limited (`RATE_LIMIT_PRECHECK`, default 20/minute). Body
+`{ "student_name": "...", "student_email": "..." }`.
+
+Opens a session. **Creates no attempt and starts no clock** — time spent granting
+permissions is not exam time. Returns the requirements derived from the
+server-side policy, the monitoring notice (the lockdown provider's own statement
+of what it cannot do, verbatim), a `precheck_token` shown once, and a 15-minute
+expiry.
+
+409 `LOCKDOWN_CLIENT_REQUIRED` for a LOCKDOWN quiz: no desktop client exists, and
+the exam is refused rather than run as browser monitoring under a stronger name.
+409 `ATTEMPT_ALREADY_EXISTS` if this student already attempted the quiz.
+
+### `POST /api/public/precheck/{id}/capabilities`
+Body is a capability report — what this browser *can* do, not what is currently
+running. The server compares it with the policy.
+
+A browser that falls short is **BLOCKED**, with `missing` naming each unmet
+capability. It is never given a quietly reduced exam: the teacher would have no
+way to tell which students were actually monitored. A blocked session cannot
+proceed to readiness (409 `PRECHECK_BLOCKED`).
+
+### `POST /api/public/precheck/{id}/readiness`
+Body is an observation report: `camera_active`, `face_detected`,
+`consent_accepted`, `monitoring_impaired` and so on.
+
+**There is no `ready` field, and no way to express a verdict.** The schema
+forbids extra keys, so sending `ready`, `status`, `severity` or `verdict` is a
+422. `evaluate_readiness` on the server is the only thing that can return
+`ready: true`, and it returns the per-check breakdown so a student can be told
+what to fix.
+
+`monitoring_impaired: true` blocks the start. Honest self-reporting is believed
+and refused, never waved through.
+
+### `POST /api/public/precheck/{id}/start`
+Rate limited (`RATE_LIMIT_ATTEMPT_START`). Empty body.
+
+Re-evaluates the policy against the stored observations rather than trusting the
+stored `READY`, then calls the unmodified Phase 3 attempt creation — so
+`started_at` is stamped from the server clock *now*. Returns the same
+`AttemptStart` shape as the direct route, with `proctoring_mode` and
+`heartbeat_interval_seconds` populated.
+
+Single-use: a second call is 409 `PRECHECK_ALREADY_USED`. 409
+`PRECHECK_NOT_READY` if the checks did not pass, or no longer pass because the
+teacher changed the policy meanwhile.
+
+## Proctoring during the exam (attempt token)
+
+### `POST /api/student/attempts/{id}/proctoring/heartbeat`
+Rate limited (`RATE_LIMIT_HEARTBEAT`, default 120/minute). Body reports observed
+stream state. **No severity, violation count, suspicion score or verdict field
+exists**; sending one is a 422.
+
+Returns `proctoring_status`, the server-side violation total, any signals it
+recorded, warnings for the student, `next_heartbeat_seconds` (the server sets the
+cadence), and `auto_submitted`.
+
+Missing heartbeats are *not* detected here — a client can stop calling this. They
+are detected on every other student request, which a client cannot avoid.
+
+### `POST /api/student/attempts/{id}/proctoring/evidence`
+Rate limited (`RATE_LIMIT_EVIDENCE`). `multipart/form-data` with `kind` and
+`file`. Content type, kind and size are all validated before storage; the
+effective size cap is the smaller of the evidence limit and `MAX_REQUEST_BYTES`.
+
+Write-only: the response carries **no URL and no path**. A storage failure
+returns `stored: false` rather than raising — losing a picture must never cost an
+exam.
+
+## Proctoring review (teacher, owner-scoped)
+
+### `GET /api/attempts/{id}/proctoring`
+The timeline, the evidence (with 5-minute signed URLs minted after the ownership
+check), the precheck record, the monitoring capability inventory, and a summary.
+
+The summary carries `outcome` (`NO_SIGNALS`, `INFORMATIONAL_ONLY`,
+`REVIEW_RECOMMENDED`, `MONITORING_INCOMPLETE`) and `caveats`. There is no
+suspicion score and no ranking: the strongest statement the platform makes is
+that a person should look, and it says why.
+
+404 for an attempt on another teacher's quiz — the ownership predicate is in the
+query, so nothing leaks, not even existence.
+
+### `POST /api/attempts/{id}/proctoring/review`
+Body `{ "decision": "...", "note": "..." }`. Decisions are
+`REVIEWED_NO_ACTION`, `REVIEWED_CONCERN`, `REVIEWED_ESCALATED`. `PENDING` is the
+initial state and is rejected as a decision (422).
+
+**There is no "cheating" decision.** Academic misconduct is a process an
+institution runs; a dropdown here would misrepresent both the evidence and the
+process. Recording a decision changes no mark — the review and the score are
+separate fields.
 
 ## Results (teacher)
 
