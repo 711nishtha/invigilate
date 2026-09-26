@@ -8,7 +8,6 @@ own returns 404 rather than 403.
 # NOTE: no `from __future__ import annotations` here. Rate-limited handlers are
 # wrapped by slowapi, and FastAPI then resolves annotations against the
 # wrapper's module globals, where our dependency aliases do not exist.
-import uuid
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse

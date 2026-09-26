@@ -52,7 +52,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.clock import ensure_aware, utcnow
-from app.core.config import settings
 from app.core.errors import AppError, Conflict, NotFound
 from app.core.logging import Event, log_event
 from app.core.security import (

@@ -33,9 +33,9 @@ from app.db.models import (
     ProctoringStatus,
     Quiz,
 )
-from app.services import evidence_service, integrity_policy, proctoring_service
+from app.services import evidence_service, integrity_policy
 from app.services.proctoring_policy import policy_for
-from tests.factories import full_attempt, make_family, make_quiz, make_user, make_variant
+from tests.factories import full_attempt, make_family, make_quiz, make_variant
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
 

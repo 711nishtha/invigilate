@@ -9,7 +9,6 @@ can forget the ownership predicate.
 # handlers are wrapped by slowapi, and FastAPI then resolves their annotations
 # against the wrapper's module globals, where our dependency aliases do not
 # exist. Real annotation objects sidestep that entirely.
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Request, Response, status

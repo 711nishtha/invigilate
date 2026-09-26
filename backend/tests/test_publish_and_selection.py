@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.db.models import VariantStatus
-from app.services.publish_rules import BlockerCode, evaluate_publish_readiness
+from app.services.publish_rules import BlockerCode
 from app.services.selection import (
     SelectionCriteria,
     build_pools,

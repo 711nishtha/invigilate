@@ -11,7 +11,6 @@ The claims under test:
 
 from __future__ import annotations
 
-import uuid
 from datetime import timedelta
 
 import pytest
@@ -28,7 +27,7 @@ from app.db.models import (
     ProctoringStatus,
     Quiz,
 )
-from app.services import integrity_policy, proctoring_policy, proctoring_service
+from app.services import integrity_policy, proctoring_policy
 from tests.factories import full_attempt
 
 ALL_RUNNING = {

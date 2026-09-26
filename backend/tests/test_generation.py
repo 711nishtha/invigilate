@@ -23,7 +23,6 @@ from app.ai.factory import set_ai_provider
 from app.ai.gemini import GeminiProvider, _parse_variants
 from app.ai.stub import StubProvider
 from app.db.models import QuestionType
-from app.services.variant_service import generate_variants
 from tests.test_ownership import make_family, make_quiz
 
 

@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import generate_attempt_token, hash_attempt_token
-from app.db.models import Attempt, AttemptStatus, Quiz, QuestionVariant, VariantStatus
+from app.db.models import Attempt, Quiz, QuestionVariant, VariantStatus
 from tests.test_ownership import make_family, make_quiz
 
 
