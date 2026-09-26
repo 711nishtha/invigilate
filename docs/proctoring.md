@@ -338,6 +338,7 @@ and not a bug to route around.
 | Phase 5 tests | 166 new (583 -> 749) |
 | Phase 1–4 regression | **passing**, unchanged |
 | Frontend typecheck + build | **passing** |
+| Playwright suite | **20 passing** (13 existing + 7 proctoring-claim guards) |
 | Migration 0004 renders for PostgreSQL (offline) | **passing**, both directions |
 | Migration/model enum parity | **passing**, asserted by test |
 | Migration executed against live PostgreSQL | **NOT RUN** — no PostgreSQL reachable in this environment (Docker daemon not running, nothing on :5432) |
