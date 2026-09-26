@@ -38,11 +38,14 @@ interface RequestOptions {
   body?: unknown
   auth?: Auth
   attemptToken?: string
+  /** Scoped to one pre-exam check, and to nothing else. */
+  precheckToken?: string
   signal?: AbortSignal
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, auth = 'teacher', attemptToken, signal } = options
+  const { method = 'GET', body, auth = 'teacher', attemptToken, precheckToken, signal } =
+    options
   const headers: Record<string, string> = { Accept: 'application/json' }
 
   if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -55,6 +58,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     if (!attemptToken) throw new ApiError(401, 'MISSING_ATTEMPT_TOKEN', 'No attempt token.')
     headers['X-Attempt-Token'] = attemptToken
   }
+
+  // Carried independently of `auth`, because a precheck request is otherwise
+  // unauthenticated: the token names one session and grants nothing else.
+  if (precheckToken) headers['X-Precheck-Token'] = precheckToken
 
   let response: Response
   try {
@@ -92,6 +99,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 export type UserRole = 'TEACHER' | 'STUDENT' | 'ADMIN'
 export type QuizStatus = 'DRAFT' | 'GENERATING' | 'READY' | 'PUBLISHED' | 'CLOSED' | 'ARCHIVED'
 export type SecurityLevel = 'STANDARD' | 'SECURE' | 'STRICT'
+export type ProctoringMode = 'STANDARD' | 'PROCTORED' | 'LOCKDOWN'
+/** Note the absence of a 'PASSED' state: monitoring is observed, impaired,
+ *  or not verifiable. It never silently becomes a clean exam. */
+export type ProctoringStatus = 'NOT_REQUIRED' | 'ACTIVE' | 'DEGRADED' | 'UNVERIFIABLE'
+/** There is deliberately no 'CHEATING' member. */
+export type ProctoringReview =
+  | 'PENDING'
+  | 'REVIEWED_NO_ACTION'
+  | 'REVIEWED_CONCERN'
+  | 'REVIEWED_ESCALATED'
 export type QuestionType = 'MCQ' | 'NUMERICAL' | 'TRUE_FALSE' | 'SHORT_ANSWER'
 export type VariantStatus = 'GENERATED' | 'VALIDATED' | 'APPROVED' | 'PUBLISHED' | 'REJECTED'
 export type GenerationStatus = 'AI_GENERATED' | 'DETERMINISTIC' | 'MANUAL' | 'FAILED'
@@ -140,6 +157,8 @@ export interface Quiz {
   allow_backtracking: boolean
   show_score_after_submission: boolean
   coverage_config_json: Record<string, string[]>
+  proctoring_mode: ProctoringMode
+  proctoring_config_json: Record<string, unknown>
   status: QuizStatus
   public_code: string | null
   created_at: string
@@ -251,6 +270,9 @@ export interface PublicQuiz {
   max_integrity_violations: number
   allow_backtracking: boolean
   requires_fullscreen: boolean
+  proctoring_mode: ProctoringMode
+  /** When true, /q/:code routes to the pre-exam check instead of starting. */
+  requires_precheck: boolean
   shows_score_after_submission: boolean
   owner_name: string | null
 }
@@ -266,6 +288,9 @@ export interface AttemptStart {
   question_count: number
   allow_backtracking: boolean
   security_level: SecurityLevel
+  proctoring_mode: ProctoringMode
+  /** The cadence the server requires. The client does not choose its own. */
+  heartbeat_interval_seconds: number
 }
 
 export type AttemptStatus =
@@ -289,6 +314,9 @@ export interface AttemptState {
   answered_count: number
   allow_backtracking: boolean
   security_level: SecurityLevel
+  proctoring_mode: ProctoringMode
+  proctoring_status: ProctoringStatus
+  heartbeat_interval_seconds: number
   integrity_status: IntegrityStatus
   violation_count: number
   max_integrity_violations: number
@@ -334,6 +362,26 @@ export type IntegrityEventType =
   | 'KEYBOARD_SHORTCUT_ATTEMPT'
   | 'NETWORK_DISCONNECTED'
   | 'NETWORK_RECONNECTED'
+  // Phase 5 proctoring signals. Only the client-reportable ones are listed:
+  // PROCTORING_HEARTBEAT_LOST, PRECHECK_PASSED and EVIDENCE_CAPTURED are
+  // server-generated and the API refuses them from a student.
+  | 'CAMERA_STARTED'
+  | 'CAMERA_STOPPED'
+  | 'MICROPHONE_STARTED'
+  | 'MICROPHONE_STOPPED'
+  | 'SCREEN_SHARE_STARTED'
+  | 'SCREEN_SHARE_STOPPED'
+  | 'CAMERA_PERMISSION_DENIED'
+  | 'MICROPHONE_PERMISSION_DENIED'
+  | 'SCREEN_SHARE_PERMISSION_DENIED'
+  | 'FACE_PRESENT'
+  | 'FACE_MISSING'
+  | 'MULTIPLE_FACES_DETECTED'
+  | 'GAZE_AWAY_SUSTAINED'
+  | 'SCREEN_RECORDING_STARTED'
+  | 'SCREEN_RECORDING_STOPPED'
+  | 'DEVICE_CHANGED'
+  | 'PROCTORING_UNAVAILABLE'
 
 export interface IntegrityEventResult {
   recorded: boolean
@@ -482,6 +530,132 @@ export interface SendResultsResult {
   error_message: string | null
 }
 
+// --- Proctoring -------------------------------------------------------------
+
+export type PrecheckStatus =
+  | 'PENDING'
+  | 'BLOCKED'
+  | 'FAILED'
+  | 'READY'
+  | 'CONSUMED'
+  | 'EXPIRED'
+
+/** What the server requires. Derived from a policy the browser never sees whole. */
+export interface PrecheckRequirements {
+  mode: ProctoringMode
+  camera: boolean
+  microphone: boolean
+  screen_share: boolean
+  fullscreen: boolean
+  face_presence: boolean
+  multiple_face_detection: boolean
+  gaze_signals: boolean
+  object_detection: boolean
+  screen_recording: boolean
+  consent: boolean
+  evidence_stored: boolean
+  evidence_retention_days: number
+  face_missing_grace_seconds: number
+  gaze_away_grace_seconds: number
+  heartbeat_interval_seconds: number
+  required_capabilities: string[]
+}
+
+export interface PrecheckSession {
+  precheck_id: string
+  /** Shown once. Only its hash is stored, as with an attempt token. */
+  precheck_token: string
+  status: PrecheckStatus
+  mode: ProctoringMode
+  server_time: string
+  expires_at: string
+  requirements: PrecheckRequirements
+  /** The provider's own words about what monitoring cannot do. Rendered as-is. */
+  monitoring_notice: string[]
+}
+
+export interface CapabilityVerdict {
+  precheck_id: string
+  status: PrecheckStatus
+  satisfiable: boolean
+  missing: string[]
+  notes: string[]
+}
+
+export interface ReadinessVerdict {
+  precheck_id: string
+  status: PrecheckStatus
+  /** Computed by the server. There is no request field that can set it. */
+  ready: boolean
+  checks: Record<string, boolean>
+  failures: string[]
+  server_time: string
+  expires_at: string
+}
+
+export interface HeartbeatResult {
+  acknowledged: boolean
+  server_time: string
+  proctoring_status: ProctoringStatus
+  integrity_status: IntegrityStatus
+  violation_total: number
+  max_integrity_violations: number
+  next_heartbeat_seconds: number
+  signals_recorded: string[]
+  warnings: string[]
+  auto_submitted: boolean
+  attempt_status: AttemptStatus
+}
+
+export interface ProctoringSummary {
+  mode: ProctoringMode
+  proctoring_status: ProctoringStatus
+  review_state: ProctoringReview
+  outcome: string
+  headline: string
+  /** Shown next to the numbers, never tucked into a help page. */
+  caveats: string[]
+  signal_counts: Record<string, number>
+  violation_total: number
+  max_violations: number
+  evidence_count: number
+  auto_submitted: boolean
+}
+
+export interface ProctoringEvidenceItem {
+  id: string
+  kind: string
+  captured_at: string
+  content_type: string
+  size_bytes: number
+  retention_expires_at: string
+  /** Short-lived and minted per request. Null once retention has purged it. */
+  download_url: string | null
+  metadata: Record<string, unknown>
+}
+
+export interface ProctoringEventItem {
+  id: string
+  event_type: string
+  severity: number
+  occurred_at: string
+  action_taken: string
+  metadata: Record<string, unknown>
+}
+
+export interface ProctoringDetail {
+  attempt_id: string
+  student_name: string
+  student_email: string
+  summary: ProctoringSummary
+  monitoring_capabilities: Record<string, unknown>
+  precheck: Record<string, unknown> | null
+  events: ProctoringEventItem[]
+  evidence: ProctoringEvidenceItem[]
+  last_heartbeat_at: string | null
+  server_time: string
+}
+
 export const api = {
   health: () => request<HealthStatus>('/health', { auth: 'none' }),
 
@@ -541,6 +715,42 @@ export const api = {
       auth: 'none',
     }),
 
+  // --- Pre-exam security check (precheck token) ----------------------------
+  //
+  // A proctored quiz cannot be started through startAttempt: the server
+  // refuses. This is the only path in, and the server authorizes each step.
+
+  startPrecheck: (code: string, body: { student_name: string; student_email: string }) =>
+    request<PrecheckSession>(`/public/quizzes/${encodeURIComponent(code)}/precheck`, {
+      method: 'POST',
+      body,
+      auth: 'none',
+    }),
+
+  submitCapabilities: (precheckId: string, token: string, body: Record<string, unknown>) =>
+    request<CapabilityVerdict>(`/public/precheck/${precheckId}/capabilities`, {
+      method: 'POST',
+      body,
+      auth: 'none',
+      precheckToken: token,
+    }),
+
+  submitReadiness: (precheckId: string, token: string, body: Record<string, unknown>) =>
+    request<ReadinessVerdict>(`/public/precheck/${precheckId}/readiness`, {
+      method: 'POST',
+      body,
+      auth: 'none',
+      precheckToken: token,
+    }),
+
+  startProctoredExam: (precheckId: string, token: string) =>
+    request<AttemptStart>(`/public/precheck/${precheckId}/start`, {
+      method: 'POST',
+      body: {},
+      auth: 'none',
+      precheckToken: token,
+    }),
+
   // --- Student (attempt token) ---------------------------------------------
   getAttempt: (attemptId: string, attemptToken: string) =>
     request<AttemptState>(`/student/attempts/${attemptId}`, { auth: 'attempt', attemptToken }),
@@ -596,6 +806,75 @@ export const api = {
     request<AttemptDetail>(`/attempts/${attemptId}/detail`),
 
   listDeliveries: (quizId: string) => request<Delivery[]>(`/quizzes/${quizId}/deliveries`),
+
+  // --- Proctoring (attempt token) ------------------------------------------
+
+  /**
+   * Report observed monitoring state.
+   *
+   * The body carries observations only. There is no severity, violation count
+   * or verdict field, and the backend rejects unknown keys, so there is nothing
+   * the client could add that would change the server's conclusion.
+   */
+  proctoringHeartbeat: (
+    attemptId: string,
+    attemptToken: string,
+    body: {
+      camera_active: boolean
+      microphone_active: boolean
+      screen_share_active: boolean
+      fullscreen_active: boolean
+      monitoring_impaired: boolean
+      impaired_reason?: string | null
+    },
+  ) =>
+    request<HeartbeatResult>(`/student/attempts/${attemptId}/proctoring/heartbeat`, {
+      method: 'POST',
+      body,
+      auth: 'attempt',
+      attemptToken,
+    }),
+
+  /**
+   * Upload one evidence still.
+   *
+   * multipart, so it bypasses the JSON helper. Write-only: the response carries
+   * no URL and no path, because a student uploads evidence about themselves and
+   * does not get to read the store back.
+   */
+  uploadEvidence: async (
+    attemptId: string,
+    attemptToken: string,
+    kind: string,
+    blob: Blob,
+  ): Promise<{ stored: boolean; reason?: string | null }> => {
+    const form = new FormData()
+    form.append('kind', kind)
+    form.append('file', blob, 'frame.jpg')
+    const response = await fetch(
+      `${env.apiUrl}/api/student/attempts/${attemptId}/proctoring/evidence`,
+      { method: 'POST', headers: { 'X-Attempt-Token': attemptToken }, body: form },
+    )
+    if (!response.ok) {
+      // Evidence is best effort. A failed upload must never interrupt an exam,
+      // so this resolves rather than throwing into the monitoring loop.
+      return { stored: false, reason: `HTTP_${response.status}` }
+    }
+    return (await response.json()) as { stored: boolean; reason?: string | null }
+  },
+
+  // --- Proctoring review (teacher) -----------------------------------------
+  getProctoringDetail: (attemptId: string) =>
+    request<ProctoringDetail>(`/attempts/${attemptId}/proctoring`),
+
+  recordProctoringReview: (
+    attemptId: string,
+    body: { decision: ProctoringReview; note?: string | null },
+  ) =>
+    request<ProctoringSummary>(`/attempts/${attemptId}/proctoring/review`, {
+      method: 'POST',
+      body,
+    }),
 
   emailResults: (quizId: string) =>
     request<SendResultsResult>(`/quizzes/${quizId}/email-results`, {
