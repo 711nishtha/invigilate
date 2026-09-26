@@ -14,6 +14,7 @@ import { QuizResultsPage } from './pages/teacher/QuizResultsPage'
 import { QuizVariantsPage } from './pages/teacher/QuizVariantsPage'
 import { AttemptPage } from './pages/student/AttemptPage'
 import { AttemptSubmittedPage } from './pages/student/AttemptSubmittedPage'
+import { PrecheckPage } from './pages/student/PrecheckPage'
 import { PublicQuizPage } from './pages/student/PublicQuizPage'
 
 /**
@@ -48,6 +49,9 @@ export default function App() {
 
       {/* Student routes: no Supabase session required. */}
       <Route path="/q/:publicCode" element={<PublicQuizPage />} />
+      {/* A proctored quiz starts here, not at /q/:code: the server refuses
+          to create an attempt for one through the direct route. */}
+      <Route path="/q/:publicCode/check" element={<PrecheckPage />} />
       <Route path="/attempt/:attemptId" element={<AttemptPage />} />
       <Route path="/attempt/:attemptId/submitted" element={<AttemptSubmittedPage />} />
 

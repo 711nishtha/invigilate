@@ -33,7 +33,13 @@ export function PublicQuizPage() {
     let active = true
     api
       .getPublicQuiz(publicCode)
-      .then((result) => active && setQuiz(result))
+      .then((result) => {
+        if (!active) return
+        setQuiz(result)
+        // A monitored exam is started through the pre-exam check, where the
+        // timer does not run while permissions are granted.
+        if (result.requires_precheck) navigate(`/q/${publicCode}/check`, { replace: true })
+      })
       .catch((caught) =>
         active &&
         setLoadError(
@@ -45,11 +51,18 @@ export function PublicQuizPage() {
     return () => {
       active = false
     }
-  }, [publicCode])
+  }, [publicCode, navigate])
 
   async function handleStart(event: React.FormEvent) {
     event.preventDefault()
     if (!quiz) return
+    if (quiz.requires_precheck) {
+      // Belt and braces: the page normally redirects on load. The server
+      // refuses this route for a proctored quiz regardless of what the client
+      // does, so this only saves the student a pointless error.
+      navigate(`/q/${publicCode}/check`, { replace: true })
+      return
+    }
     setBusy(true)
     setError(null)
     try {

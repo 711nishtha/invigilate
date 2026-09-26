@@ -53,6 +53,10 @@ class PublicQuizOut(APIModel):
     max_integrity_violations: int
     allow_backtracking: bool
     requires_fullscreen: bool
+    proctoring_mode: ProctoringMode = ProctoringMode.STANDARD
+    # Whether the student must pass a pre-exam security check. The landing
+    # page routes on this; the server enforces it regardless.
+    requires_precheck: bool = False
     shows_score_after_submission: bool
     owner_name: str | None
 

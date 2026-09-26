@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
+import { ProctoringPanel } from '../../components/ProctoringPanel'
 import { Spinner } from '../../components/Spinner'
 import { ErrorNote, formatDuration } from '../../components/ui'
 import { api, type AttemptDetail } from '../../lib/api'
@@ -204,6 +205,10 @@ export function AttemptDetailPage() {
           finding of misconduct, and they cannot detect activity outside this browser tab.
         </p>
       </section>
+      {/* The proctoring record sits under the marking, because it is
+          context for a decision about a person, not part of the mark. */}
+      <ProctoringPanel attemptId={attemptId} />
+
     </div>
   )
 }

@@ -158,6 +158,8 @@ def get_public_quiz(public_code: str, db: DbSession) -> PublicQuizOut:
         max_integrity_violations=quiz.max_integrity_violations,
         allow_backtracking=quiz.allow_backtracking,
         requires_fullscreen=quiz.security_level.value in ("SECURE", "STRICT"),
+        proctoring_mode=quiz.proctoring_mode,
+        requires_precheck=proctoring_policy.policy_for(quiz).requires_precheck,
         shows_score_after_submission=quiz.show_score_after_submission,
         owner_name=quiz.owner.name if quiz.owner else None,
     )

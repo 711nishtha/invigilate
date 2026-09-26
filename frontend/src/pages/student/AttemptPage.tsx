@@ -4,6 +4,8 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { Spinner } from '../../components/Spinner'
 import { ErrorNote } from '../../components/ui'
 import { useIntegrityMonitor } from '../../hooks/useIntegrityMonitor'
+import { useProctoringMonitor } from '../../hooks/useProctoringMonitor'
+import { requestCamera, requestMicrophone, stopStream } from '../../lib/proctoring'
 import {
   ApiError,
   api,
@@ -46,6 +48,13 @@ export function AttemptPage() {
   // Local countdown seconds. Seeded and repeatedly corrected from the server;
   // never used to decide anything, only to render.
   const [remaining, setRemaining] = useState<number | null>(null)
+  // Proctoring streams. A MediaStream cannot survive a navigation, so the
+  // runner re-acquires what the pre-exam check already got permission for.
+  // The browser does not prompt again for a grant this origin already holds,
+  // so this is silent for the student.
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null)
+  const [micStream, setMicStream] = useState<MediaStream | null>(null)
+  const proctorVideoRef = useRef<HTMLVideoElement | null>(null)
   // Answers that failed to reach the server, retried on reconnect.
   const pending = useRef<Map<string, Record<string, unknown>>>(new Map())
 
@@ -130,6 +139,85 @@ export function AttemptPage() {
       }
     }
   }, [attemptId, token])
+
+  const proctored = Boolean(state) && state?.proctoring_mode !== 'STANDARD'
+
+  useEffect(() => {
+    if (!proctored || state?.is_terminal) return
+    let cancelled = false
+    let camera: MediaStream | null = null
+    let microphone: MediaStream | null = null
+
+    void (async () => {
+      const cam = await requestCamera()
+      if (cancelled) {
+        stopStream(cam.stream)
+        return
+      }
+      camera = cam.stream
+      setCameraStream(cam.stream)
+      if (proctorVideoRef.current && cam.stream) {
+        proctorVideoRef.current.srcObject = cam.stream
+      }
+      // A refused re-acquisition is reported rather than hidden: the server
+      // needs to know monitoring is not running, and it decides what that
+      // costs.
+      if (!cam.stream && token) {
+        void api.reportIntegrityEvent(attemptId, token, {
+          event_type: 'CAMERA_PERMISSION_DENIED',
+          metadata: { failure: cam.failure ?? 'UNKNOWN' },
+        })
+      }
+      const mic = await requestMicrophone()
+      if (cancelled) {
+        stopStream(mic.stream)
+        return
+      }
+      microphone = mic.stream
+      setMicStream(mic.stream)
+    })()
+
+    return () => {
+      cancelled = true
+      stopStream(camera)
+      stopStream(microphone)
+    }
+    // Deliberately keyed on `proctored` alone: re-running this on every state
+    // poll would restart the camera every few seconds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proctored, attemptId, token])
+
+  const proctoring = useProctoringMonitor({
+    attemptId,
+    attemptToken: token ?? '',
+    requirements: proctored
+      ? {
+          // The runner only needs the cadence and the grace windows the server
+          // published; the rest of the policy is not its business.
+          mode: state?.proctoring_mode ?? 'PROCTORED',
+          camera: true,
+          microphone: false,
+          screen_share: false,
+          fullscreen: state?.security_level !== 'STANDARD',
+          face_presence: true,
+          multiple_face_detection: true,
+          gaze_signals: false,
+          object_detection: false,
+          screen_recording: false,
+          consent: true,
+          evidence_stored: true,
+          evidence_retention_days: 30,
+          face_missing_grace_seconds: 15,
+          gaze_away_grace_seconds: 20,
+          heartbeat_interval_seconds: state?.heartbeat_interval_seconds || 30,
+          required_capabilities: [],
+        }
+      : null,
+    streams: { camera: cameraStream, microphone: micStream, screen: null },
+    videoRef: proctorVideoRef,
+    enabled: proctored && Boolean(token) && !state?.is_terminal,
+    onAutoSubmitted: () => finish(),
+  })
 
   // Called for its side effects: it attaches the browser listeners.
   useIntegrityMonitor({
@@ -228,6 +316,20 @@ export function AttemptPage() {
 
   return (
     <div className="exam-locked flex min-h-screen flex-col bg-white">
+      {/* Always visible while monitored. A student should be able to see what
+          the camera sees, rather than trust that it is pointed somewhere
+          reasonable — and a visible preview also makes it obvious that the
+          camera is on. */}
+      {proctored && (
+        <video
+          ref={proctorVideoRef}
+          autoPlay
+          playsInline
+          muted
+          aria-label="Your camera, as the exam sees it"
+          className="fixed bottom-4 right-4 z-20 w-40 rounded-lg border border-slate-300 bg-slate-900 shadow-lg"
+        />
+      )}
       <header className="sticky top-0 z-10 border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3 px-6 py-3">
           <div>
@@ -253,6 +355,23 @@ export function AttemptPage() {
             >
               {state.violation_count} / {state.max_integrity_violations} recorded
             </span>
+            {proctored && (
+              <span
+                aria-live="polite"
+                title="What the monitoring can currently see"
+                className={`rounded-full px-3 py-1 text-xs font-medium ${
+                  proctoring.proctoringStatus === 'ACTIVE'
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : 'bg-amber-50 text-amber-800'
+                }`}
+              >
+                {proctoring.proctoringStatus === 'ACTIVE'
+                  ? 'monitoring on'
+                  : proctoring.proctoringStatus === 'DEGRADED'
+                    ? 'monitoring interrupted'
+                    : 'monitoring unavailable'}
+              </span>
+            )}
             <span
               aria-live="polite"
               className={`font-mono text-lg font-semibold tabular-nums ${
@@ -266,6 +385,23 @@ export function AttemptPage() {
           </div>
         </div>
 
+        {proctored && proctoring.impaired && (
+          <p className="bg-amber-50 px-6 py-2 text-center text-xs text-amber-900">
+            Monitoring is not working in this browser
+            {proctoring.impairedReason ? `: ${proctoring.impairedReason}` : '.'} Your exam
+            continues and your answers are safe. Your teacher will see that this period could
+            not be monitored.
+          </p>
+        )}
+        {proctored &&
+          proctoring.warnings.map((message) => (
+            <p
+              key={message}
+              className="bg-amber-50 px-6 py-2 text-center text-xs text-amber-900"
+            >
+              {message}
+            </p>
+          ))}
         {offline && (
           <p className="bg-amber-50 px-6 py-2 text-center text-xs text-amber-900">
             You appear to be offline. Your answers are saved locally and will be sent when the
