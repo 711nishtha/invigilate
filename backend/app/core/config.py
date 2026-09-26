@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     # mail storm.
     rate_limit_export: str = "10/minute"
     rate_limit_email: str = "5/minute"
+    # Phase 5. The precheck limit is tighter than attempt start because a
+    # precheck is cheap to request and creates a row; the heartbeat limit is
+    # loose because an exam legitimately sends one every 30 seconds.
+    rate_limit_precheck: str = "20/minute"
+    rate_limit_heartbeat: str = "120/minute"
+    rate_limit_evidence: str = "60/minute"
     max_request_bytes: int = 262_144
 
     # --- Exam engine -------------------------------------------------------
@@ -102,6 +108,9 @@ class Settings(BaseSettings):
         "rate_limit_generation",
         "rate_limit_export",
         "rate_limit_email",
+        "rate_limit_precheck",
+        "rate_limit_heartbeat",
+        "rate_limit_evidence",
     )
     @classmethod
     def _validate_rate_limit(cls, value: str) -> str:

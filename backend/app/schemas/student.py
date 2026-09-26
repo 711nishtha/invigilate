@@ -17,6 +17,8 @@ from typing import Any, Literal
 from pydantic import EmailStr, Field
 
 from app.db.models import (
+    ProctoringMode,
+    ProctoringStatus,
     AttemptStatus,
     IntegrityEventType,
     IntegrityStatus,
@@ -75,6 +77,12 @@ class AttemptStartResponse(APIModel):
     question_count: int
     allow_backtracking: bool
     security_level: SecurityLevel
+    # Phase 5. STANDARD for every quiz that does not use a pre-exam check, so
+    # an existing client that ignores these fields is unaffected.
+    proctoring_mode: ProctoringMode = ProctoringMode.STANDARD
+    # How often the runner must report monitoring state. The cadence is the
+    # server's to set, not the client's to choose.
+    heartbeat_interval_seconds: int = 0
 
 
 # --- Attempt state ---------------------------------------------------------
@@ -93,6 +101,11 @@ class AttemptStateOut(APIModel):
     answered_count: int
     allow_backtracking: bool
     security_level: SecurityLevel
+    proctoring_mode: ProctoringMode = ProctoringMode.STANDARD
+    # Never has a "passed" value; see ProctoringStatus. The runner shows this
+    # to the student so a monitoring failure is visible rather than silent.
+    proctoring_status: ProctoringStatus = ProctoringStatus.NOT_REQUIRED
+    heartbeat_interval_seconds: int = 0
     integrity_status: IntegrityStatus
     # The official, server-side total. Shown so a student knows where they
     # stand; it is read from the attempt row, never from the client.

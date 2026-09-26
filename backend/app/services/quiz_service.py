@@ -12,10 +12,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.clock import utcnow
-from app.core.errors import Conflict
+from app.core.errors import AppError, Conflict
 from app.core.logging import Event, log_event
 from app.core.security import generate_public_code
 from app.db.models import Attempt, QuestionVariant, Quiz, QuizStatus, User, VariantStatus
+from app.services import proctoring_policy
 from app.services.publish_rules import PublishReadiness, evaluate_publish_readiness
 
 # Settings that change the exam a student is sitting. Locked once a quiz is
@@ -30,6 +31,12 @@ EXAM_SHAPE_FIELDS = frozenset(
         "allow_backtracking",
         "max_integrity_violations",
         "coverage_config_json",
+        # Proctoring is part of the exam's shape. A student who passed a
+        # pre-exam check for a PROCTORED quiz must not find themselves in a
+        # differently-monitored exam because the teacher edited it while the
+        # link was live.
+        "proctoring_mode",
+        "proctoring_config_json",
     }
 )
 
@@ -61,6 +68,19 @@ def update_quiz(db: Session, quiz: Quiz, changes: dict[str, Any]) -> Quiz:
             f"A {quiz.status.value.lower()} quiz cannot be edited.",
             code="QUIZ_NOT_EDITABLE",
         )
+
+    # The policy has to be validated against the *resulting* state, not the
+    # submitted fragment: sending only `proctoring_config_json` must be checked
+    # against the mode already on the row, and vice versa.
+    if "proctoring_mode" in changes or "proctoring_config_json" in changes:
+        mode = changes.get("proctoring_mode", quiz.proctoring_mode)
+        config = changes.get("proctoring_config_json", quiz.proctoring_config_json or {})
+        try:
+            proctoring_policy.validate_config(mode, config)
+        except ValueError as exc:
+            raise AppError(
+                str(exc), code="PROCTORING_CONFIG_INVALID", status_code=422
+            ) from exc
 
     for field, value in changes.items():
         setattr(quiz, field, value)

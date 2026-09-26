@@ -6,10 +6,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
-from app.db.models import QuizStatus, SecurityLevel
+from app.db.models import ProctoringMode, QuizStatus, SecurityLevel
 from app.schemas.common import APIModel, StrictModel
+from app.services import proctoring_policy
 
 MIN_DURATION_SECONDS = 60
 MAX_DURATION_SECONDS = 28_800
@@ -26,6 +27,23 @@ class QuizCreateRequest(StrictModel):
     allow_backtracking: bool = True
     show_score_after_submission: bool = False
     coverage_config_json: dict[str, Any] = Field(default_factory=dict)
+    # Phase 5. Defaults to STANDARD, so an existing client that never sends
+    # these fields keeps creating exactly the quizzes it did before.
+    proctoring_mode: ProctoringMode = ProctoringMode.STANDARD
+    proctoring_config_json: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_proctoring(self) -> "QuizCreateRequest":
+        """Reject a policy that cannot mean what it says.
+
+        Same reasoning as coverage_config_json: an unrecognised key that is
+        stored and never read lets a teacher believe a requirement is in force
+        when nothing enforces it. Cross-field rules are checked too, so
+        "detect faces" without "require camera" is refused rather than silently
+        producing an exam that reports nothing.
+        """
+        proctoring_policy.validate_config(self.proctoring_mode, self.proctoring_config_json)
+        return self
 
     @field_validator("coverage_config_json")
     @classmethod
@@ -60,6 +78,8 @@ class QuizUpdateRequest(StrictModel):
     allow_backtracking: bool | None = None
     show_score_after_submission: bool | None = None
     coverage_config_json: dict[str, Any] | None = None
+    proctoring_mode: ProctoringMode | None = None
+    proctoring_config_json: dict[str, Any] | None = None
 
     _validate_coverage = field_validator("coverage_config_json")(
         QuizCreateRequest._validate_coverage.__func__  # type: ignore[attr-defined]
@@ -101,6 +121,8 @@ class QuizOut(APIModel):
     allow_backtracking: bool
     show_score_after_submission: bool
     coverage_config_json: dict[str, Any]
+    proctoring_mode: ProctoringMode
+    proctoring_config_json: dict[str, Any]
     status: QuizStatus
     public_code: str | None
     created_at: datetime

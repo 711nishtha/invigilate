@@ -16,14 +16,19 @@ request that touches it, whatever that request was trying to do.
 # NOTE: no `from __future__ import annotations` here. Rate-limited handlers are
 # wrapped by slowapi, and FastAPI then resolves annotations against the
 # wrapper's module globals, where our dependency aliases do not exist.
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, File, Form, Request, Response, UploadFile, status
 
 from app.api.deps import AttemptToken, DbSession
 from app.core.clock import ensure_aware, utcnow
 from app.core.config import settings
 from app.core.errors import AppError, Conflict
 from app.core.rate_limit import limiter
-from app.db.models import Attempt, IntegrityEventType, Quiz
+from app.db.models import Attempt, EvidenceKind, IntegrityEventType, Quiz
+from app.schemas.proctoring import (
+    EvidenceUploadResponse,
+    ProctoringHeartbeatRequest,
+    ProctoringHeartbeatResponse,
+)
 from app.schemas.student import (
     AnswerRequest,
     AnswerResponse,
@@ -38,7 +43,14 @@ from app.schemas.student import (
     StudentQuestionOut,
     SubmitRequest,
 )
-from app.services import attempt_service, integrity_policy
+from app.services import (
+    attempt_service,
+    evidence_service,
+    integrity_policy,
+    precheck_service,
+    proctoring_policy,
+    proctoring_service,
+)
 from app.services.attempt_access import require_active_attempt, resolve_attempt
 from app.services.attempt_finalization import finalize_attempt, finalize_if_expired
 
@@ -67,6 +79,15 @@ def _load(db: DbSession, attempt_id: str, token: str, *, for_update: bool = Fals
         # rather than leaving an attempt stuck IN_PROGRESS forever.
         finalize_if_expired(db, context.attempt)
         context = resolve_attempt(db, attempt_id=attempt_id, token=token, for_update=for_update)
+    elif not context.attempt.is_terminal:
+        # A student can keep answering questions while their monitoring loop is
+        # dead, so silence is checked on the ordinary request path rather than
+        # only on the heartbeat endpoint — which a client could simply stop
+        # calling. Debounced by the repeat window, and never punitive: it marks
+        # the attempt UNVERIFIABLE, which is a statement about what the server
+        # can see, not about the student.
+        if proctoring_service.check_heartbeat_staleness(db, context.attempt, quiz):
+            db.commit()
 
     return context, quiz
 
@@ -83,6 +104,13 @@ def _state(attempt: Attempt, quiz: Quiz, questions) -> AttemptStateOut:  # type:
         answered_count=attempt_service.answered_count(questions),
         allow_backtracking=quiz.allow_backtracking,
         security_level=quiz.security_level,
+        proctoring_mode=attempt.proctoring_mode,
+        proctoring_status=attempt.proctoring_status,
+        heartbeat_interval_seconds=(
+            proctoring_policy.policy_for(quiz).heartbeat_interval_seconds
+            if attempt.proctoring_mode.value != "STANDARD"
+            else 0
+        ),
         integrity_status=attempt.integrity_status,
         violation_count=attempt.integrity_violation_count,
         max_integrity_violations=quiz.max_integrity_violations,
@@ -154,6 +182,16 @@ def start_attempt(
     creates rows.
     """
     quiz = attempt_service.get_public_quiz(db, public_code)
+
+    # Bypass prevention, and the whole of it. A proctored exam cannot be
+    # started through this endpoint at all, so a student cannot skip the
+    # pre-exam checks by calling the route the checks were put in front of.
+    # There is no flag, no header and no payload field that relaxes this; the
+    # only way into a proctored exam is POST /public/precheck/{id}/start, and
+    # that route re-evaluates the policy server-side before it creates
+    # anything.
+    precheck_service.require_precheck_for_direct_start(quiz)
+
     started = attempt_service.create_attempt(
         db,
         quiz,
@@ -172,6 +210,8 @@ def start_attempt(
         question_count=started.question_count,
         allow_backtracking=quiz.allow_backtracking,
         security_level=quiz.security_level,
+        proctoring_mode=attempt.proctoring_mode,
+        heartbeat_interval_seconds=0,
     )
 
 
@@ -309,6 +349,146 @@ def record_integrity_event(
         action_taken=outcome.action_taken.value,
         auto_submitted=auto_submitted,
         attempt_status=attempt.status,
+    )
+
+
+@student_router.post(
+    "/attempts/{attempt_id}/proctoring/heartbeat",
+    response_model=ProctoringHeartbeatResponse,
+)
+@limiter.limit(settings.rate_limit_heartbeat)
+def proctoring_heartbeat(
+    request: Request,
+    response: Response,
+    attempt_id: str,
+    payload: ProctoringHeartbeatRequest,
+    token: AttemptToken,
+    db: DbSession,
+) -> ProctoringHeartbeatResponse:
+    """Report observed monitoring state.
+
+    The browser says what it currently sees — the camera track is live, the
+    screen share is running. The server decides what that means, records any
+    signals at server-assigned severity, updates the monitoring status and
+    applies the configured stream-loss action.
+
+    There is no field on the request that carries severity, a violation count, a
+    suspicion score or a verdict, and ``StrictModel`` rejects unknown keys, so an
+    attempt to supply one is a 422 rather than something quietly ignored.
+
+    Missing heartbeats are not caught here — a client can simply stop calling
+    this endpoint. They are caught in ``_load``, on every other student request.
+    """
+    context, quiz = _load(db, attempt_id, token, for_update=True)
+    attempt = require_active_attempt(context)
+
+    outcome = proctoring_service.record_heartbeat(
+        db, attempt, quiz, payload.model_dump(exclude={"client_reported_at"})
+    )
+
+    if outcome.auto_submitted:
+        integrity_policy.record_event(
+            db,
+            attempt,
+            quiz,
+            event_type=IntegrityEventType.AUTO_SUBMISSION_TRIGGERED,
+            server_generated=True,
+        )
+        # The same Phase 3 finalization path, with the same grading. A
+        # proctoring decision can end an exam early; it cannot change a mark.
+        finalize_attempt(db, attempt, reason="AUTO_PROCTORING")
+    else:
+        db.commit()
+
+    db.refresh(attempt)
+    policy = proctoring_policy.policy_for(quiz)
+    return ProctoringHeartbeatResponse(
+        acknowledged=True,
+        server_time=utcnow(),
+        proctoring_status=attempt.proctoring_status,
+        integrity_status=attempt.integrity_status,
+        violation_total=attempt.integrity_violation_count,
+        max_integrity_violations=quiz.max_integrity_violations,
+        next_heartbeat_seconds=policy.heartbeat_interval_seconds,
+        signals_recorded=outcome.signals_recorded,
+        warnings=outcome.warnings,
+        auto_submitted=outcome.auto_submitted,
+        attempt_status=attempt.status.value,
+    )
+
+
+@student_router.post(
+    "/attempts/{attempt_id}/proctoring/evidence",
+    response_model=EvidenceUploadResponse,
+)
+@limiter.limit(settings.rate_limit_evidence)
+async def upload_evidence(
+    request: Request,
+    response: Response,
+    attempt_id: str,
+    token: AttemptToken,
+    db: DbSession,
+    kind: str = Form(...),
+    file: UploadFile = File(...),
+) -> EvidenceUploadResponse:
+    """Store one evidence artefact for this attempt.
+
+    This is what makes a proctoring signal reviewable: "no face detected" is an
+    assertion by an untrusted browser, but a still image at that moment is
+    something a human can look at and disagree with.
+
+    Write-only from the student's side. The response carries no URL and no path:
+    a student uploads evidence about themselves and does not get to read the
+    store back. Teachers read it through a signed URL minted after an ownership
+    check.
+
+    Bounded hard — size, content type and kind are all validated before the
+    bytes are stored — because this endpoint is authenticated by nothing but an
+    attempt token and must not double as free object storage. A storage failure
+    returns ``stored=false`` rather than raising: losing a picture must never
+    cost an exam.
+    """
+    context, quiz = _load(db, attempt_id, token)
+    attempt = require_active_attempt(context)
+    policy = proctoring_policy.policy_for(quiz)
+
+    try:
+        evidence_kind = EvidenceKind(kind)
+    except ValueError:
+        raise AppError(
+            "Unknown evidence kind.",
+            code="EVIDENCE_KIND_INVALID",
+            details={"allowed": [k.value for k in EvidenceKind]},
+        ) from None
+
+    # Read at most one byte past the limit, so an oversized upload is refused
+    # without buffering it.
+    limit = evidence_service.max_bytes_for(evidence_kind)
+    content = await file.read(limit + 1)
+    try:
+        evidence_service.validate_artefact(
+            evidence_kind, file.content_type or "", len(content)
+        )
+    except evidence_service.EvidenceRejected as exc:
+        raise AppError(str(exc), code="EVIDENCE_REJECTED") from exc
+
+    captured = await evidence_service.capture(
+        db,
+        attempt,
+        policy,
+        kind=evidence_kind,
+        content=content,
+        content_type=file.content_type or "application/octet-stream",
+    )
+    db.commit()
+
+    if captured.evidence is None:
+        return EvidenceUploadResponse(stored=False, reason=captured.reason)
+    return EvidenceUploadResponse(
+        stored=True,
+        evidence_id=captured.evidence.id,
+        kind=captured.evidence.kind,
+        retention_expires_at=ensure_aware(captured.evidence.retention_expires_at),
     )
 
 

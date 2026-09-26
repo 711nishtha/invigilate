@@ -27,6 +27,11 @@ _REDACT_KEYS = (
     "service_role",
     "correct_option",
     "numeric_answer",
+    # An evidence object path is the only secret protecting a recording of a
+    # student, and a signed URL is a bearer credential for it. Neither is
+    # logged deliberately; this makes an accidental one harmless too.
+    "object_path",
+    "signed_url",
 )
 
 _RESERVED = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {
@@ -100,6 +105,18 @@ class Event:
     EXPORT_CREATED = "EXPORT_CREATED"
     EMAIL_SENT = "EMAIL_SENT"
     EMAIL_FAILED = "EMAIL_FAILED"
+    # --- Phase 5: proctoring ---------------------------------------------
+    PRECHECK_STARTED = "PRECHECK_STARTED"
+    PRECHECK_BLOCKED = "PRECHECK_BLOCKED"
+    PRECHECK_EVALUATED = "PRECHECK_EVALUATED"
+    PRECHECK_AUTHORIZED = "PRECHECK_AUTHORIZED"
+    PRECHECK_CONSUMED = "PRECHECK_CONSUMED"
+    PROCTORING_HEARTBEAT = "PROCTORING_HEARTBEAT"
+    PROCTORING_DEGRADED = "PROCTORING_DEGRADED"
+    PROCTORING_REVIEWED = "PROCTORING_REVIEWED"
+    EVIDENCE_STORED = "EVIDENCE_STORED"
+    EVIDENCE_STORE_FAILED = "EVIDENCE_STORE_FAILED"
+    EVIDENCE_PURGED = "EVIDENCE_PURGED"
 
 
 _domain_logger = get_logger("securequiz.event")
