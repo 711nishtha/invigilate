@@ -28,3 +28,9 @@ class StubStorageProvider(StorageProvider):
         if self.fail_with is not None:
             raise self.fail_with
         return f"https://stub.storage.local/{bucket}/{path}?expires_in={expires_in}"
+
+    async def delete(self, *, bucket: str, path: str) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        # Idempotent: a missing key is a success, matching the real provider.
+        self.objects.pop(f"{bucket}/{path}", None)

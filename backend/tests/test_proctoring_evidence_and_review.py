@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import uuid
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -226,6 +227,9 @@ class TestAStorageFailureNeverCostsAnExam:
                 raise StorageUnavailable("bucket unreachable")
 
             async def signed_url(self, **kwargs):  # type: ignore[no-untyped-def]
+                raise StorageUnavailable("bucket unreachable")
+
+            async def delete(self, **kwargs):  # type: ignore[no-untyped-def]
                 raise StorageUnavailable("bucket unreachable")
 
         attempt, _token, _q = full_attempt(db)
@@ -491,3 +495,64 @@ class TestRecordingAReviewDecision:
             headers=teacher_b,
         )
         assert response.status_code == 404
+
+
+class TestRetentionActuallyDeletes:
+    """"Kept for 30 days" has to mean the object goes away, not just the row."""
+
+    def test_the_storage_interface_requires_a_delete(self) -> None:
+        """Without it the purge job would delete rows and orphan recordings."""
+        from app.storage.base import StorageProvider
+
+        assert "delete" in StorageProvider.__abstractmethods__
+
+    @pytest.mark.anyio
+    async def test_deleting_an_absent_object_is_a_success(self) -> None:
+        """The purge runs on a schedule and retries; a 404 must not block a row
+        from ever being cleaned up."""
+        from app.storage.stub import StubStorageProvider
+
+        storage = StubStorageProvider()
+        await storage.delete(bucket="evidence", path="never/existed.jpg")
+
+    @pytest.mark.anyio
+    async def test_a_purge_removes_the_object_and_then_the_row(
+        self, db: Session
+    ) -> None:
+        from app.storage.stub import StubStorageProvider
+
+        storage = StubStorageProvider()
+        attempt, _token, _q = full_attempt(db)
+        quiz = db.get(Quiz, attempt.quiz_id)
+        assert quiz is not None
+        quiz.proctoring_mode = ProctoringMode.PROCTORED
+        quiz.proctoring_config_json = {"require_camera": True, "store_evidence": True}
+        db.commit()
+
+        captured = await evidence_service.capture(
+            db,
+            attempt,
+            policy_for(quiz),
+            kind=EvidenceKind.EVENT_SNAPSHOT,
+            content=PNG,
+            content_type="image/png",
+            provider=storage,
+        )
+        db.commit()
+        assert captured.evidence is not None
+        key = f"{captured.evidence.bucket}/{captured.evidence.object_path}"
+        assert key in storage.objects
+
+        # Retention has closed.
+        captured.evidence.retention_expires_at = utcnow() - timedelta(days=1)
+        db.commit()
+
+        due = evidence_service.expired_evidence(db)
+        assert len(due) == 1
+        for row in due:
+            await storage.delete(bucket=row.bucket, path=row.object_path)
+            db.delete(row)
+        db.commit()
+
+        assert key not in storage.objects
+        assert db.query(ProctoringEvidence).count() == 0

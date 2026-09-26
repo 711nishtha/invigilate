@@ -63,5 +63,19 @@ class StorageProvider(ABC):
         server-side first.
         """
 
+    @abstractmethod
+    async def delete(self, *, bucket: str, path: str) -> None:
+        """Remove one object. Deleting something absent is not an error.
+
+        Added for Phase 5 retention. Without it "kept for 30 days" would mean
+        "kept forever, with a date attached": the purge job would delete the
+        database row and leave the recording of a student in the bucket, which
+        is the worst of both outcomes — unfindable and undeleted.
+
+        Idempotent on purpose. The purge job runs on a schedule and retries, so
+        a missing object must be a success rather than a permanent failure that
+        blocks the row from ever being cleaned up.
+        """
+
     async def aclose(self) -> None:
         """Release transport resources. Safe to call more than once."""

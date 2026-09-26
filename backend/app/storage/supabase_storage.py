@@ -155,6 +155,44 @@ class SupabaseStorageProvider(StorageProvider):
         return f"{self.base_url}/storage/v1{signed}" if signed.startswith("/") else signed
 
 
+    async def delete(self, *, bucket: str, path: str) -> None:
+        """Remove one object. A 404 is success, not a failure.
+
+        Retention deletion is retried on a schedule, so treating an
+        already-absent object as an error would keep the row alive forever and
+        the job perpetually "failing".
+        """
+        self._require_config()
+        client = await self._get_client()
+        url = f"{self.base_url}/storage/v1/object/{bucket}/{path}"
+
+        try:
+            response = await client.request(
+                "DELETE", url, headers=self._headers(), timeout=self.timeout
+            )
+        except httpx.TimeoutException as exc:
+            raise StorageUnavailable("Supabase Storage timed out.", detail=str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise StorageUnavailable(
+                "Could not reach Supabase Storage.", detail=str(exc)
+            ) from exc
+
+        if response.status_code == 404:
+            return
+        if response.status_code >= 500:
+            raise StorageUnavailable(
+                f"Supabase Storage returned {response.status_code}.",
+                detail=_safe_detail(response),
+            )
+        if response.status_code >= 400:
+            raise StorageRejected(
+                f"Supabase Storage refused the delete ({response.status_code}).",
+                detail=_safe_detail(response),
+            )
+        # The path is not logged: it is the only secret protecting the object.
+        logger.info("Deleted a stored object", extra={"bucket": bucket})
+
+
 def _safe_detail(response: httpx.Response) -> str:
     """A short, non-sensitive slice of an error body.
 

@@ -508,10 +508,70 @@ An export holds student names, emails, answers and marks. Therefore:
    address is wrong or compromised, the workbook goes with it. The recipient
    cannot be overridden per request, which is deliberate, but it does mean
    account hygiene is the control.
-5. Screen and camera capture are opt-in browser streams, not proctoring, and stop
-   the moment the student denies permission.
+7. Camera, microphone and screen capture are browser streams that stop the
+   moment the student revokes permission. The platform records that they
+   stopped; it cannot prevent it.
 
 These are properties of the web platform, not defects in this implementation. The
 mitigation is layering — randomized papers, a server clock, server grading, and a
 reviewable timeline — plus a future desktop lockdown client for exams that need a
 stronger boundary.
+
+## 18. Proctoring (Phase 5)
+
+Full detail in [proctoring.md](./proctoring.md). The security-relevant summary:
+
+**A proctored exam is started by the server, not the browser.** The Phase 3
+route `POST /public/quizzes/{code}/attempts` refuses any quiz that requires a
+pre-exam check, so a student cannot skip the checks by calling the endpoint the
+checks were placed in front of. The only route in re-evaluates the policy
+server-side at the moment of the start request rather than trusting a stored
+`READY`.
+
+**No clock runs during the check.** The attempt — and therefore `started_at`,
+`expires_at` and the frozen paper — is created only once the server authorizes
+the start. Time spent granting permissions is not exam time, and there is no
+half-started attempt for the finalization path to reason about.
+
+**The client cannot assert a conclusion.** No request model in the proctoring
+surface has a `ready`, `severity`, `violation_count`, `suspicion_score` or
+`verdict` field, and `StrictModel` turns an attempt to send one into a 422.
+
+**Capability gaps block rather than downgrade.** A browser that cannot meet a
+requirement is refused with a named reason. A silently reduced proctored exam
+would leave the teacher unable to tell which students were actually monitored,
+which is worse than refusing.
+
+**Monitoring never silently passes.** `ProctoringStatus` has no `PASSED` value.
+Impairment is `DEGRADED`, silence is `UNVERIFIABLE`, and both are visible to the
+teacher. A client that honestly reports it cannot monitor is believed and costs
+zero severity — punishing that would train clients to stop reporting it.
+
+**One frame is never a decision.** Every counted proctoring signal has a
+server-side repeat window, so a blinking webcam or a looping client cannot walk
+an honest attempt into auto-submission.
+
+**A proctoring failure never corrupts a result.** Nothing in the proctoring
+services writes to `score`, `percentage` or `is_correct`. At worst an exam ends
+early, through the same finalization path and the same grading as any other
+auto-submission, and the attempt is flagged.
+
+**Evidence is private.** Private bucket, no public URLs, signed links minted
+only after an ownership check, retention written at capture and actually
+enforced by a purge job that deletes the object before the row.
+
+### Additional limitations introduced by proctoring
+
+8. **Face detection is Chromium-only.** `FaceDetector` does not exist in Firefox
+   or Safari. No model is bundled, so a quiz requiring face presence is
+   effectively Chrome/Edge desktop only — stated to the student at the precheck
+   rather than discovered mid-exam.
+9. **Object and phone detection are not implemented.** The architecture exists;
+   no detector is shipped and the capability reports false.
+10. **LOCKDOWN mode does not work and is refused.** It requires a signed desktop
+    client that does not exist. The server declines to start such an exam rather
+    than running it as browser monitoring under a stronger name.
+11. **Client-reported observations are claims, not proof.** A determined student
+    can make a browser report anything. What makes a claim checkable is the
+    stored evidence beside it and the human who reviews it — neither of which
+    the platform presents as conclusive.

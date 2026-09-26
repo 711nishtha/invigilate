@@ -4,9 +4,12 @@ Online assessment where every student opens the **same public link** and receive
 a **different randomized exam**, with server-authoritative timing, grading and
 integrity monitoring.
 
-> **What this is:** secure online assessment with integrity monitoring.
+> **What this is:** secure online assessment with integrity monitoring, and an
+> optional proctored mode with camera-based checks.
 > **What this is not:** a claim that cheating is impossible. A browser cannot see
-> the operating system. See [docs/security.md](docs/security.md).
+> the operating system, the room, or a second device. LOCKDOWN mode is refused
+> rather than faked, because no desktop client exists.
+> See [docs/security.md](docs/security.md) and [docs/proctoring.md](docs/proctoring.md).
 
 ## Stack
 
@@ -32,6 +35,12 @@ variants · Resend for result email · openpyxl for XLSX.
 | AI output is never trusted | Strict validation, dedup, mandatory human approval |
 | An email failure never costs a result | Delivery is a separate table; results are durable first |
 | Exports are built from the database | Generated server-side; nothing authoritative in the browser |
+| A proctored exam cannot be self-started | The browser has no route to one; the server authorizes each start |
+| The exam clock never runs during setup | The attempt is created *after* the checks pass, not before |
+| Monitoring never silently "passes" | `ProctoringStatus` has no such value; a gap is reported as a gap |
+| One bad frame is never a decision | Server-side repeat windows on every counted proctoring signal |
+| Evidence stays private | Private bucket, signed URLs after an ownership check, enforced retention |
+| Proctoring never changes a mark | Review and score are separate fields; grading is the same path |
 
 ## Repository layout
 
@@ -61,6 +70,7 @@ secure-quiz/
 │   │   ├── services/             exam engine: attempts, grading, integrity, export, email
 │   │   ├── ai/                   AIProvider, GeminiProvider, validation, dedupe
 │   │   ├── email/                EmailProvider, ResendEmailProvider
+│   │   ├── lockdown/             LockdownProvider; browser vs desktop capabilities
 │   │   └── storage/              Supabase Storage
 │   └── tests/                    pytest
 └── frontend/
@@ -145,7 +155,7 @@ only and must never appear in a `VITE_`-prefixed variable.
 | 2 | Quiz engine: quiz CRUD, question families, variants, teacher review, AI generation, publish lifecycle | done |
 | 3 | Student assessment engine: public link, attempt creation, assignment, server timer, answers, integrity events, auto-submit, grading, result | done |
 | 4 | Results: teacher dashboard, attempt detail, XLSX export, Resend email, storage, load test | done |
-| 5 | Live provider verification | Gemini **verified**; Resend and Supabase pending credentials |
+| 5 | Proctoring: security modes, server-side start authorization, evidence, teacher review | done |
 | 6 | Hardening: deployment, load behaviour, operational runbook | |
 
 ## Documentation
@@ -153,4 +163,5 @@ only and must never appear in a `VITE_`-prefixed variable.
 [Runbook](docs/runbook.md) — the exact deployment steps ·
 [Architecture](docs/architecture.md) · [Security](docs/security.md) ·
 [Database](docs/database.md) · [API](docs/api.md) ·
-[Deployment](docs/deployment.md) · [AI generation](docs/ai-generation.md)
+[Deployment](docs/deployment.md) · [AI generation](docs/ai-generation.md) ·
+[Proctoring](docs/proctoring.md)
