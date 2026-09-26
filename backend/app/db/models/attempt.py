@@ -23,11 +23,18 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, created_at_column, uuid_pk
-from app.db.models.enums import AttemptStatus, IntegrityStatus
+from app.db.models.enums import (
+    AttemptStatus,
+    IntegrityStatus,
+    ProctoringMode,
+    ProctoringReview,
+    ProctoringStatus,
+)
 from app.db.types import BigInt, GUID, JSONColumn, pg_enum
 
 if TYPE_CHECKING:
     from app.db.models.integrity import IntegrityEvent
+    from app.db.models.proctoring import ProctoringEvidence
     from app.db.models.question import QuestionVariant
     from app.db.models.quiz import Quiz
     from app.db.models.user import User
@@ -78,6 +85,49 @@ class Attempt(Base):
         default=IntegrityStatus.CLEAN,
         server_default=IntegrityStatus.CLEAN.value,
     )
+    # --- Phase 5: proctoring ------------------------------------------------
+    # The mode the attempt actually ran under, copied from the quiz at start so
+    # that a later change to the quiz cannot rewrite the history of an exam
+    # that has already been sat.
+    proctoring_mode: Mapped[ProctoringMode] = mapped_column(
+        pg_enum(ProctoringMode, "proctoring_mode"),
+        nullable=False,
+        default=ProctoringMode.STANDARD,
+        server_default=ProctoringMode.STANDARD.value,
+    )
+    # What the server can currently say about monitoring. There is no "PASSED":
+    # see ProctoringStatus. Never silently improves on its own.
+    proctoring_status: Mapped[ProctoringStatus] = mapped_column(
+        pg_enum(ProctoringStatus, "proctoring_status"),
+        nullable=False,
+        default=ProctoringStatus.NOT_REQUIRED,
+        server_default=ProctoringStatus.NOT_REQUIRED.value,
+    )
+    # Server receipt time of the last proctoring heartbeat. Silence past the
+    # configured grace is what PROCTORING_HEARTBEAT_LOST is raised from.
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The pre-exam check this attempt was authorized by, if any. Its presence is
+    # the audit trail for "the server, not the browser, allowed this to start".
+    precheck_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID, ForeignKey("precheck_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    # A teacher's conclusion about the proctoring timeline. Separate from
+    # integrity_status, which is arithmetic: this one is a person's judgement,
+    # and it has no "cheating" value by design.
+    proctoring_review: Mapped[ProctoringReview] = mapped_column(
+        pg_enum(ProctoringReview, "proctoring_review"),
+        nullable=False,
+        default=ProctoringReview.PENDING,
+        server_default=ProctoringReview.PENDING.value,
+    )
+    proctoring_review_note: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Suppresses duplicate result emails on a repeated submit.
     results_emailed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -85,7 +135,10 @@ class Attempt(Base):
     created_at: Mapped[datetime] = created_at_column()
 
     quiz: Mapped["Quiz"] = relationship(back_populates="attempts")
-    student_user: Mapped["User | None"] = relationship()
+    # ``attempts`` has two foreign keys to ``users`` since Phase 5 added
+    # reviewed_by_id, so both relationships must name their column.
+    student_user: Mapped["User | None"] = relationship(foreign_keys=[student_user_id])
+    reviewed_by: Mapped["User | None"] = relationship(foreign_keys=[reviewed_by_id])
     questions: Mapped[list["AttemptQuestion"]] = relationship(
         back_populates="attempt",
         cascade="all, delete-orphan",
@@ -95,6 +148,11 @@ class Attempt(Base):
         back_populates="attempt",
         cascade="all, delete-orphan",
         order_by="IntegrityEvent.occurred_at",
+    )
+    evidence: Mapped[list["ProctoringEvidence"]] = relationship(
+        back_populates="attempt",
+        cascade="all, delete-orphan",
+        order_by="ProctoringEvidence.captured_at",
     )
 
     __table_args__ = (

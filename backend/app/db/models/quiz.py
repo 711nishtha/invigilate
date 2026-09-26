@@ -22,11 +22,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, created_at_column, uuid_pk
-from app.db.models.enums import QuizStatus, SecurityLevel
+from app.db.models.enums import ProctoringMode, QuizStatus, SecurityLevel
 from app.db.types import GUID, JSONColumn, pg_enum
 
 if TYPE_CHECKING:
     from app.db.models.attempt import Attempt
+    from app.db.models.proctoring import PrecheckSession
     from app.db.models.question import QuestionFamily
     from app.db.models.user import User
 
@@ -65,6 +66,23 @@ class Quiz(Base):
     show_score_after_submission: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    # --- Phase 5: proctoring -------------------------------------------------
+    # Orthogonal to security_level, which governs in-page browser behaviour.
+    # This governs whether a *pre-exam security check* is mandatory and whether
+    # the server will refuse to start an attempt until it has passed.
+    proctoring_mode: Mapped[ProctoringMode] = mapped_column(
+        pg_enum(ProctoringMode, "proctoring_mode"),
+        nullable=False,
+        default=ProctoringMode.STANDARD,
+        server_default=ProctoringMode.STANDARD.value,
+    )
+    # Teacher overrides on top of the mode's defaults. Validated against
+    # services.proctoring_policy.CONFIGURABLE_KEYS on write, so an unrecognised
+    # key is refused rather than stored and never read.
+    proctoring_config_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONColumn, nullable=False, default=dict, server_default=text("'{}'")
+    )
+
     status: Mapped[QuizStatus] = mapped_column(
         pg_enum(QuizStatus, "quiz_status"),
         nullable=False,
@@ -86,6 +104,9 @@ class Quiz(Base):
         back_populates="quiz", cascade="all, delete-orphan", order_by="QuestionFamily.position"
     )
     attempts: Mapped[list["Attempt"]] = relationship(
+        back_populates="quiz", cascade="all, delete-orphan"
+    )
+    precheck_sessions: Mapped[list["PrecheckSession"]] = relationship(
         back_populates="quiz", cascade="all, delete-orphan"
     )
 

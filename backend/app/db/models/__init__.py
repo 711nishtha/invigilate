@@ -9,10 +9,16 @@ from app.db.models.attempt import Answer, Attempt, AttemptQuestion
 from app.db.models.delivery import DeliveryKind, DeliveryStatus, ResultDelivery
 from app.db.models.enums import (
     AttemptStatus,
+    EvidenceKind,
+    EvidenceSource,
     GenerationStatus,
     IntegrityAction,
     IntegrityEventType,
     IntegrityStatus,
+    PrecheckStatus,
+    ProctoringMode,
+    ProctoringReview,
+    ProctoringStatus,
     QuestionType,
     QuizStatus,
     SecurityLevel,
@@ -20,6 +26,7 @@ from app.db.models.enums import (
     VariantStatus,
 )
 from app.db.models.integrity import IntegrityEvent
+from app.db.models.proctoring import PrecheckSession, ProctoringEvidence
 from app.db.models.question import QuestionFamily, QuestionVariant
 from app.db.models.quiz import Quiz
 from app.db.models.user import User
@@ -32,17 +39,25 @@ __all__ = [
     "Base",
     "DeliveryKind",
     "DeliveryStatus",
+    "EvidenceKind",
+    "EvidenceSource",
     "GenerationStatus",
     "IntegrityAction",
     "IntegrityEvent",
     "IntegrityEventType",
     "IntegrityStatus",
+    "PrecheckSession",
+    "PrecheckStatus",
+    "ProctoringEvidence",
+    "ProctoringMode",
+    "ProctoringReview",
+    "ProctoringStatus",
     "QuestionFamily",
     "QuestionType",
     "QuestionVariant",
     "Quiz",
-    "ResultDelivery",
     "QuizStatus",
+    "ResultDelivery",
     "SecurityLevel",
     "User",
     "UserRole",
