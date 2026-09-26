@@ -18,10 +18,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.clock import utcnow
+from app.core.clock import ensure_aware, utcnow
 from app.core.logging import Event, log_event
+from app.services import proctoring_policy
 from app.db.models import (
     Attempt,
     IntegrityAction,
@@ -70,6 +72,11 @@ SEVERITY: dict[IntegrityEventType, int] = {
     IntegrityEventType.MULTIPLE_SESSION_DETECTED: 3,
 }
 
+# Phase 5 proctoring weights live next to the policy they belong to and are
+# merged in here, so there is still exactly one severity table at runtime and
+# `severity_for` remains the only way to ask.
+SEVERITY.update(proctoring_policy.PROCTORING_SEVERITY)
+
 # Events the server generates itself. A client claiming one of these is
 # fabricating the audit trail, so they are refused on the student endpoint.
 SERVER_ONLY_EVENTS = frozenset(
@@ -78,6 +85,9 @@ SERVER_ONLY_EVENTS = frozenset(
         IntegrityEventType.AUTO_SUBMISSION_TRIGGERED,
         IntegrityEventType.ATTEMPT_RESUMED,
     }
+    # Proctoring markers the server raises itself; a client claiming one would
+    # be writing fiction into the audit trail.
+    | proctoring_policy.PROCTORING_SERVER_ONLY_EVENTS
 )
 
 # Metadata is attacker-controlled, so it is bounded before it reaches storage.
@@ -150,6 +160,35 @@ def record_event(
     """
     severity = severity_for(event_type)
 
+    # Rule: one frame is never a decision.
+    #
+    # Proctoring signals arrive from a loop running in a browser. A webcam that
+    # blinks, a student who leans out of frame, or simply a buggy client can
+    # emit the same signal many times a second. Counting each one would let an
+    # honest attempt be auto-submitted by a hardware glitch, so a repeat inside
+    # the signal's window is recorded for the timeline at severity zero.
+    #
+    # Enforced here rather than in the client, because the client is the thing
+    # this protects against. Only Phase 5 signals have a window, so Phase 3
+    # behaviour is unchanged.
+    suppressed = False
+    if severity > 0 and not server_generated:
+        window = proctoring_policy.repeat_window(event_type)
+        if window is not None:
+            previous = db.scalar(
+                select(IntegrityEvent.occurred_at)
+                .where(
+                    IntegrityEvent.attempt_id == attempt.id,
+                    IntegrityEvent.event_type == event_type,
+                    IntegrityEvent.severity > 0,
+                )
+                .order_by(IntegrityEvent.occurred_at.desc())
+                .limit(1)
+            )
+            if previous is not None and utcnow() - ensure_aware(previous) < window:
+                severity = 0
+                suppressed = True
+
     total = attempt.integrity_violation_count + severity
     attempt.integrity_violation_count = total
     attempt.integrity_status = _status_for(total, quiz)
@@ -170,7 +209,11 @@ def record_event(
         # Server receipt time is the authoritative ordering of the timeline.
         occurred_at=utcnow(),
         client_reported_at=client_reported_at,
-        metadata_json=sanitize_metadata(metadata),
+        metadata_json=(
+            {**sanitize_metadata(metadata), "repeat_suppressed": True}
+            if suppressed
+            else sanitize_metadata(metadata)
+        ),
         action_taken=action,
     )
     db.add(event)
@@ -186,6 +229,7 @@ def record_event(
         integrity_status=attempt.integrity_status.value,
         action_taken=action.value,
         server_generated=server_generated,
+        repeat_suppressed=suppressed,
     )
 
     return IntegrityOutcome(
