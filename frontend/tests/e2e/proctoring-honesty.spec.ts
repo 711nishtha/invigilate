@@ -143,3 +143,35 @@ test.describe('proctoring claims in the shipped bundle', () => {
     expect(code).toContain('object_detection')
   })
 })
+
+test.describe('deployment headers permit what proctoring needs', () => {
+  /**
+   * vercel.json's Permissions-Policy is the one piece of deployment config that
+   * can disable a proctoring feature without failing a single test or showing an
+   * error anywhere useful. A policy of `microphone=()` blocks getUserMedia for
+   * audio at the browser level, so a quiz with require_microphone would fail its
+   * precheck for every student with no indication why.
+   */
+  const policy = (): string => {
+    const config = JSON.parse(
+      readFileSync(join(process.cwd(), 'vercel.json'), 'utf8'),
+    ) as { headers: Array<{ headers: Array<{ key: string; value: string }> }> }
+    const header = config.headers
+      .flatMap((entry) => entry.headers)
+      .find((h) => h.key.toLowerCase() === 'permissions-policy')
+    return header?.value ?? ''
+  }
+
+  for (const feature of ['camera', 'microphone', 'display-capture']) {
+    test(`allows ${feature} for this origin`, () => {
+      // `feature=(self)` permits it; `feature=()` blocks it for everyone.
+      expect(policy()).toContain(`${feature}=(self)`)
+    })
+  }
+
+  test('still denies features the product never uses', () => {
+    for (const feature of ['geolocation', 'payment', 'usb']) {
+      expect(policy()).toContain(`${feature}=()`)
+    }
+  })
+})

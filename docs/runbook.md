@@ -210,6 +210,11 @@ inspects the built bundle for exactly these names.
 | `STORAGE_PROVIDER` | optional | — | `supabase` |
 | `RETAIN_EXPORTS` | optional | — | `false` by default; workbooks are regenerable |
 | `RATE_LIMIT_*` | optional | — | Sensible defaults; empty values are rejected at load |
+| `SUPABASE_STORAGE_BUCKET_EVIDENCE` | for proctoring | — | **Must be a private bucket.** Holds still images of students. |
+| `RATE_LIMIT_PRECHECK` | optional | — | Default `20/minute` |
+| `RATE_LIMIT_HEARTBEAT` | optional | — | Default `120/minute`. Must exceed the exam's heartbeat rate x concurrent students per IP. |
+| `RATE_LIMIT_EVIDENCE` | optional | — | Default `60/minute` |
+| `MAX_REQUEST_BYTES` | optional | — | Default 262144. Caps evidence uploads too; see [proctoring.md](./proctoring.md). |
 | `LOG_LEVEL` | optional | — | `INFO` |
 
 **The Supabase key split, stated plainly:** the **anon** key is designed to be
@@ -284,6 +289,73 @@ reason and the teacher can retry.
 
 ---
 
+## 7a. Proctoring (Phase 5)
+
+Only needed if you will publish a `PROCTORED` quiz. A `STANDARD` quiz needs
+nothing here.
+
+### Prerequisites that are not optional
+
+1. **HTTPS.** `getUserMedia` and `getDisplayMedia` do not exist on an insecure
+   origin. Vercel and Render both give you TLS; do not front either with a
+   plain-HTTP proxy.
+2. **A private `evidence` bucket** in Supabase Storage (created in §2 step 5).
+   Verify it is private — a public bucket of student webcam stills is the worst
+   failure mode this system has.
+3. **The `Permissions-Policy` header must permit what you use.**
+   `frontend/vercel.json` ships
+   `camera=(self), display-capture=(self), microphone=(self)`. A value of
+   `microphone=()` blocks audio capture at the browser level, and a quiz with
+   `require_microphone` would then fail its precheck for every student with no
+   useful error. A Playwright test pins this.
+
+### Retention purge — schedule this or retention is a lie
+
+Evidence rows carry a deletion date from the moment they are created, but
+nothing deletes them without a job.
+
+On Render: **New → Cron Job**, same repo and Dockerfile, schedule `0 3 * * *`:
+
+```
+python -m scripts.purge_evidence
+```
+
+Give it the same `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+and `SUPABASE_STORAGE_BUCKET_EVIDENCE` as the web service. Exit 0 = clean,
+1 = some deletions failed, 2 = could not run.
+
+Verify once with `python -m scripts.purge_evidence --dry-run` before letting it
+delete anything.
+
+### Browser support is narrower than the rest of the product
+
+Face presence uses the `FaceDetector` API, which is **Chromium-only** and
+build-dependent. There is no bundled model. A quiz with
+`require_face_presence` is therefore effectively Chrome/Edge desktop only, and
+a student on Firefox or Safari is **blocked at the precheck** with an
+explanation — never silently given a reduced exam.
+
+Decide this before you publish:
+
+- keep `require_face_presence` and tell students to use Chrome or Edge; or
+- set `require_face_presence: false`, accepting that the exam then verifies
+  only that a camera is running.
+
+### ⚠ Raise the integrity budget on a proctored quiz
+
+`CAMERA_STOPPED` is worth 3 and `max_integrity_violations` defaults to **2**, so
+a proctored quiz left at the default **ends the exam the first time a camera
+drops**, whatever `on_stream_loss` says. Set `max_integrity_violations` to at
+least 4 unless you genuinely want that.
+
+### LOCKDOWN mode does not work
+
+There is no desktop client. The server refuses to start a `LOCKDOWN` attempt
+with `LOCKDOWN_CLIENT_REQUIRED`. Do not set a quiz to `LOCKDOWN` expecting it to
+degrade gracefully — it will not start at all, which is the intended behaviour.
+
+---
+
 ## 8. Order of operations
 
 1. Supabase project, buckets, auth redirect URLs.
@@ -295,7 +367,9 @@ reason and the teacher can retry.
    redeploy.** This is the step that is always forgotten; the symptom is a CORS
    error on every teacher request.
 6. Add the Vercel URL to Supabase Auth redirect URLs.
-7. Run the production smoke test in §9.
+7. If you will run proctored exams, do §7a: confirm the `evidence` bucket is
+   private, and schedule the retention purge cron.
+8. Run the production smoke test in §9.
 
 ---
 
@@ -329,6 +403,41 @@ Run against the deployed system. Nothing here is automated yet.
 15. Download the Excel export. Confirm four sheets and correct data.
 16. Press **Email results to me** — **real Resend**. Confirm `SENT` and that
     the email arrives with the attachment.
+
+**Proctoring — only if you will publish a proctored quiz**
+
+Use a machine with a real webcam, in Chrome or Edge. Emulated devices do not
+exercise the failure paths that matter.
+
+23. Create a second quiz with `proctoring_mode: PROCTORED` and
+    `max_integrity_violations: 6`. Publish it.
+24. Open `/q/<code>` as a student. Confirm it redirects to `/q/<code>/check`.
+25. Confirm the monitoring notice lists what monitoring **cannot** do, and that
+    no device turns on before you tick consent.
+26. Grant the camera. Confirm the self-view appears and the face tick goes green.
+27. Confirm **no attempt exists yet** — the teacher's results page shows none.
+28. Wait two minutes on the check screen, then start. Confirm you receive the
+    **full** exam duration, not two minutes less.
+29. During the exam, cover the camera for 20 seconds. Confirm a signal is
+    recorded and the exam does **not** end (at a budget of 6).
+30. Revoke camera permission mid-exam. Confirm the badge changes to
+    "monitoring interrupted" and the exam continues.
+31. Submit. As the teacher, open the attempt and confirm the proctoring panel
+    shows the timeline, the caveats **above** the numbers, and the evidence
+    stills with working signed-URL previews.
+32. Record a review decision. Confirm the student's score is unchanged.
+
+**Proctoring — these must fail**
+
+33. Call `POST /api/public/quizzes/<code>/attempts` directly for the proctored
+    quiz → 409 `PRECHECK_REQUIRED`, and no attempt row is created.
+34. Add `"ready": true` to the readiness body → 422.
+35. Call `/start` twice → the second is 409 `PRECHECK_ALREADY_USED`, and only
+    one attempt exists.
+36. Open the precheck in Firefox → blocked, naming `face_detection`, with no
+    reduced exam offered.
+37. Set a quiz to `LOCKDOWN` and open its precheck → 409
+    `LOCKDOWN_CLIENT_REQUIRED`.
 
 **Security — every one of these must fail**
 
@@ -371,3 +480,6 @@ LOAD_DATABASE_URL=<postgres-url> ./.venv/Scripts/python.exe scripts/load_test.py
 - `GET /api/public/quizzes/<code>` returns metadata and **no** question text
 - A second attempt with the same student email is refused with 409
 - `POST /submit` twice returns the same score and sends one email
+- The `evidence` bucket is **private** (open an object URL directly → denied)
+- `python -m scripts.purge_evidence --dry-run` runs and exits 0
+- A proctored quiz's `/q/<code>` redirects to `/q/<code>/check`
